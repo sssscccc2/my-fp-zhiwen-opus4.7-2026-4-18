@@ -39,7 +39,10 @@ CREATE TABLE IF NOT EXISTS profiles (
   user_data_dir TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   last_opened_at INTEGER,
-  notes TEXT
+  notes TEXT,
+  -- JSON BrowserCookie[] (parsed by shared/cookieFormats.ts). Replayed into
+  -- the launched browser context via Playwright's addCookies() each launch.
+  cookies TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_group ON profiles(group_id);
 CREATE INDEX IF NOT EXISTS idx_profiles_proxy ON profiles(proxy_id);
@@ -118,6 +121,8 @@ function runMigrations(db: Database): void {
   };
   // 2026-04-17: per-proxy DNS routing config
   safeExec('ALTER TABLE proxies ADD COLUMN dns_config TEXT', 'add proxies.dns_config');
+  // 2026-04-18: per-profile cookie injection (paste from AdsPower / iSO etc.)
+  safeExec('ALTER TABLE profiles ADD COLUMN cookies TEXT', 'add profiles.cookies');
 }
 
 export function getDb(): Database {

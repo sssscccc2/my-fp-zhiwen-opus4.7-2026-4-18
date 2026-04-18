@@ -1,7 +1,60 @@
-# 指纹浏览器 (Fingerprint Browser)
+# 天胡 6 金 / 指纹浏览器 (Fingerprint Browser)
 
 > 开源、本地化、类 AdsPower 的反关联指纹浏览器配置文件管理器
 > 基于 [CloakBrowser](https://github.com/CloakHQ/CloakBrowser)（C++ 源码级补丁的 Chromium 145）构建
+
+---
+
+## 更新日志
+
+### v0.2.0 — Cookies 导入注入（2026-04-18）
+
+新增「**每个窗口独立的 Cookies 注入**」功能，专为接管异地账号 / 迁移会话设计。
+
+**功能要点**
+
+- 在「编辑配置」页新增 **Cookies（可选）** 卡片，支持粘贴 JSON 后保存
+- **三种格式自动识别 + 互相转换**：
+  1. iSO / AdsPower / Bit 风格（PascalCase：`Name / Value / Domain / Secure / HttpOnly / Persistent / HasExpires / Expires / Samesite`）
+  2. EditThisCookie / Cookie-Editor 扩展导出（`name / value / domain / sameSite / expirationDate`）
+  3. Playwright JSON 导出（`name / value / domain / expires / sameSite`）
+- **实时预览**：识别条目数、跳过条目数、涉及域名分布、识别格式
+- **自动去重**：同 `name + domain + path` 重复取首条，避免 cookie jar 写入冲突
+- **字段安全映射**：
+  - `Samesite "-1"`→未设置、`"0"`→`None`、`"1"`→`Lax`、`"2"`→`Strict`（Chromium 内部 enum）
+  - `1601-01-01` 这类 sentinel 时间戳自动当作 session cookie
+  - `Expires` 仅当 `HasExpires="1"` 且 `Persistent="1"` 时才参与持久化
+- **启动时自动注入**：每次启动浏览器，会在第一个 `newPage()` 之前调用 Playwright `BrowserContext.addCookies()`
+  完成注入。访问目标站点的第一个请求就带 cookie，刷新即登录态
+- **导出标准 JSON**：一键复制规范化后的 cookie 列表给其他工具使用
+- **一键清空**：保存后立即生效
+
+**安全性说明**
+
+| 检测层 | 是否受影响 | 原因 |
+|---|---|---|
+| Canvas / WebGL / Audio / 字体 fingerprint | **无** | cookie 是应用层数据，与 C++ 层指纹完全正交 |
+| `document.cookie` / `cookieStore` 表面 | **看不出** | `addCookies` 直接写 cookie jar，与 `Set-Cookie` 入库等价 |
+| TLS / JA3 / TCP fingerprint | **无** | OS / Chromium 网络层 |
+| 站点服务端会话校验 | **可能扣分** | 站点会绑定 IP 国家 / UA / 设备指纹，跨环境注入会触发风控（这是 cookie 本身的特性，不是注入手段的问题） |
+
+**最佳实践**
+
+1. **同国代理** — cookie 来源浏览器是哪个国家 IP，本窗口用同国代理
+2. **UA 系列匹配** — 来源是 Chrome Windows，本窗口指纹也用 Chrome Windows
+3. **导入后先正常浏览** — 不要立刻做敏感操作（发帖 / 改密 / 转账）
+4. **localStorage 也要补** — 仅导 cookie 是「半登录态」，部分站点会不稳定（后续版本计划支持）
+
+详见源码：[`shared/cookieFormats.ts`](./shared/cookieFormats.ts) / [`electron/main/services/browserLauncher.ts`](./electron/main/services/browserLauncher.ts)
+
+### v0.1.0 — 首个可用版本（2026-04-17）
+
+- Profile / Group / Proxy CRUD（SQLite）
+- 50+ 指纹参数配置 + 7 套真实预设
+- 每窗口独立绑定 SOCKS5 / HTTP 代理，自动检测出口 IP / 时区 / 语言
+- 自建 DNS-over-SOCKS5 桥（避免 IP / DNS 跨国不一致）
+- 远程认证服务器 + 管理后台（启用 / 禁用账号）
+- 一键打包 NSIS 安装包（内置 CloakBrowser，无需额外下载）
 
 ---
 
@@ -112,14 +165,15 @@ npm run package
 
 ## 使用流程
 
-1. **添加代理**（可选）：进入"代理管理"，添加 HTTP / SOCKS5 代理，点"测试"验证可用性
-2. **创建配置**：进入"配置文件" → "新建配置"
-   - 点击右上角"随机生成"按真实设备分布加权抽样一份指纹
-   - 或从预设下拉选择（Win10+NVIDIA / Win11+Intel / Mac M2 / Linux 等 7 套真实模板）
-   - 在 10 个 Tab 中精细调整任何参数；编辑器会实时高亮致死的不一致组合
-   - 选择代理（推荐）
-3. **一键启动**：列表上点"启动"按钮，CloakBrowser 会以该 profile 的指纹和代理打开
-4. **指纹检测**（推荐）：进入"指纹检测"，选择该 profile 并打开 BrowserScan / CreepJS / FingerprintJS 验证
+1. **登录**（首启）：连接到内置认证服务器（默认 `http://146.190.45.66:3000`），可注册新账号
+2. **创建配置**：左下角「新建窗口」
+   - 在「基本信息」填名字 / 分组 / 备注
+   - 在「代理 / 出口 IP」直接粘贴 `host:port:user:pass` 或 `socks5://...`，点「测试 & 识别出口 IP」自动获取国家 / 时区 / 语言
+   - 在「**Cookies（可选）**」粘贴 JSON（v0.2.0 起支持，详见上方更新日志）
+   - 在「DNS 设置」选「自建 DNS」搭配同国 ISP DNS（最大化"本地用户"伪装）
+   - 在「指纹参数」10 个 Tab 内精细调整任何参数；编辑器会实时高亮致死的不一致组合
+3. **一键启动**：列表上点「打开」按钮，CloakBrowser 会以该 profile 的指纹 + 代理 + cookies 打开
+4. **指纹检测**（推荐）：进入「指纹检测」，选择该 profile 并打开 whoer.net / iphey.com / browserleaks.com 验证
 
 ## 防关联设计要点
 
@@ -130,12 +184,24 @@ npm run package
 5. **代理 + 时区 geoip 联动**：避免 "美国 IP + 北京时区" 破绽
 6. **一致性校验器**：保存前自动检测 OS / GPU / Platform / UA 矛盾
 
-## Roadmap (Phase 2)
+## Roadmap
 
-- [ ] 批量导入 / 导出（Excel / JSON）
+已完成：
+
+- [x] 多窗口隔离（profile / cookies / cache）
+- [x] 每窗口独立代理 + 自动出口 IP / 时区 / 语言对齐
+- [x] DNS-over-SOCKS5（杜绝 IP / DNS 跨国不一致）
+- [x] Cookies 注入（v0.2.0，AdsPower / iSO / EditThisCookie / Playwright 多格式）
+- [x] 远程认证 + 管理后台
+- [x] 标准 NSIS 安装包（内置 Chromium）
+
+计划中：
+
+- [ ] **localStorage / sessionStorage / IndexedDB 一并导入**（让 cookie 注入达到完整登录态）
+- [ ] 批量导入 / 导出 profile（Excel / JSON）
 - [ ] RPA 可视化脚本编排
 - [ ] 多窗口同步器（鼠标键盘镜像）
-- [ ] 团队 / 多用户权限
+- [ ] 团队 / 多用户权限（已有认证基础设施）
 - [ ] WebDAV / S3 云端同步
 - [ ] 移动端 UA 模拟（iOS / Android）
 

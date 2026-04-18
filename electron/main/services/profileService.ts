@@ -23,6 +23,7 @@ interface ProfileRow {
   created_at: number;
   last_opened_at: number | null;
   notes: string | null;
+  cookies: string | null;
 }
 
 /**
@@ -117,6 +118,7 @@ function rowToProfile(row: ProfileRow): Profile {
     createdAt: row.created_at,
     lastOpenedAt: row.last_opened_at,
     notes: row.notes ?? undefined,
+    cookies: row.cookies ?? undefined,
   };
 }
 
@@ -170,8 +172,8 @@ export function createProfile(input: CreateProfileInput): Profile {
 
   const now = Date.now();
   run(
-    `INSERT INTO profiles (id, name, group_id, tags, fingerprint_config, proxy_id, user_data_dir, created_at, last_opened_at, notes)
-     VALUES (@id, @name, @groupId, @tags, @fingerprintConfig, @proxyId, @userDataDir, @createdAt, NULL, @notes)`,
+    `INSERT INTO profiles (id, name, group_id, tags, fingerprint_config, proxy_id, user_data_dir, created_at, last_opened_at, notes, cookies)
+     VALUES (@id, @name, @groupId, @tags, @fingerprintConfig, @proxyId, @userDataDir, @createdAt, NULL, @notes, @cookies)`,
     {
       id,
       name: input.name,
@@ -182,6 +184,7 @@ export function createProfile(input: CreateProfileInput): Profile {
       userDataDir,
       createdAt: now,
       notes: input.notes ?? null,
+      cookies: input.cookies ?? null,
     },
   );
 
@@ -203,6 +206,7 @@ export function updateProfile(input: UpdateProfileInput): Profile {
   }
   if (input.proxyId !== undefined) { updates.push('proxy_id = @proxyId'); params.proxyId = input.proxyId; }
   if (input.notes !== undefined) { updates.push('notes = @notes'); params.notes = input.notes; }
+  if (input.cookies !== undefined) { updates.push('cookies = @cookies'); params.cookies = input.cookies || null; }
 
   if (updates.length > 0) {
     run(`UPDATE profiles SET ${updates.join(', ')} WHERE id = @id`, params);
@@ -233,6 +237,7 @@ export function cloneProfile(id: string, newName?: string): Profile {
     fingerprint: { ...src.fingerprint, seed: Math.floor(Math.random() * 2_147_483_647) },
     proxyId: src.proxyId,
     notes: src.notes,
+    cookies: src.cookies,
   });
 }
 

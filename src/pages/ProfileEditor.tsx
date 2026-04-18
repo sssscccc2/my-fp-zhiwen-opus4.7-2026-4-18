@@ -1,10 +1,12 @@
 import {
   Form, Input, Select, InputNumber, Button, Space, Tabs, Card, App as AntApp,
   Alert, Divider, Tag, Switch, Tooltip, Row, Col, Typography, Segmented, Descriptions,
+  Statistic,
 } from 'antd';
 import {
   ReloadOutlined, ThunderboltOutlined, SaveOutlined, ArrowLeftOutlined,
   ExperimentOutlined, GlobalOutlined, CheckCircleTwoTone, CloseCircleTwoTone,
+  CloudUploadOutlined, DeleteOutlined, CopyOutlined,
 } from '@ant-design/icons';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -15,6 +17,9 @@ import type {
   ParsedProxy, ProxyTestResult, DnsMode, DnsConfig,
 } from '@shared/types';
 import { DNS_PRESETS, recommendDns } from '@shared/dnsPresets';
+import {
+  parseCookieJson, summarizeCookies, type BrowserCookie, type CookieParseResult,
+} from '@shared/cookieFormats';
 
 const TIMEZONES = [
   'Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Tokyo', 'Asia/Singapore', 'Asia/Bangkok',
@@ -69,6 +74,14 @@ export default function ProfileEditor() {
   // whether to overwrite. Format mirrors what `parseProxyString` accepts.
   const [currentProxySummary, setCurrentProxySummary] = useState<string>('');
 
+  // -------- Cookies (paste-from-AdsPower etc.) --------
+  // We store the raw textarea so the user can re-edit. On save, we re-parse
+  // and persist the *normalized* JSON (canonical BrowserCookie[]) — that way
+  // launch-time injection has zero ambiguity. Empty raw = clear cookies.
+  const [rawCookies, setRawCookies] = useState<string>('');
+  const [cookieParsed, setCookieParsed] = useState<CookieParseResult | null>(null);
+  const [storedCookieCount, setStoredCookieCount] = useState<number>(0);
+
   /** Compose the DnsConfig the editor currently represents (or undefined for default). */
   const composeDnsConfig = (): DnsConfig | undefined => {
     if (dnsMode === 'proxy') return { mode: 'proxy' };
@@ -103,6 +116,17 @@ export default function ProfileEditor() {
           tags: (p.tags ?? []).join(','),
           fingerprint: p.fingerprint,
         } as unknown as FormValues);
+        // Hydrate cookies textarea from stored canonical JSON.
+        if (p.cookies) {
+          try {
+            const arr = JSON.parse(p.cookies) as BrowserCookie[];
+            setStoredCookieCount(Array.isArray(arr) ? arr.length : 0);
+            setRawCookies(JSON.stringify(arr, null, 2));
+          } catch {
+            setStoredCookieCount(0);
+            setRawCookies(p.cookies);
+          }
+        }
         // Hydrate DNS state + current-proxy preview from the bound proxy.
         if (p.proxyId) {
           const allProxies = await api.proxy.list();
@@ -324,7 +348,28 @@ export default function ProfileEditor() {
         }
       }
 
-      const payload = {
+      // Cookies: if the textarea was modified, re-parse and persist normalized
+      // JSON. Empty textarea clears any previously stored cookies. We never
+      // refuse to save just because cookies failed to parse — the rest of the
+      // profile is more important — but we surface a warning.
+      let cookiesPayload: string | undefined;
+      const rawCk = rawCookies.trim();
+      if (!rawCk) {
+        cookiesPayload = ''; // explicit clear
+      } else {
+        const parsed = parseCookieJson(rawCk);
+        if (parsed.cookies.length === 0) {
+          message.warning('Cookies 解析后没有可用条目，本次保存将不更新 Cookies');
+          cookiesPayload = undefined; // skip cookies field
+        } else {
+          cookiesPayload = JSON.stringify(parsed.cookies);
+          if (parsed.errors.length > 0) {
+            message.warning(`Cookies：${parsed.cookies.length} 条已识别，${parsed.errors.length} 条跳过`);
+          }
+        }
+      }
+
+      const payload: Parameters<typeof api.profile.create>[0] = {
         name: values.name,
         groupId: values.groupId ?? null,
         proxyId: resolvedProxyId,
@@ -332,6 +377,7 @@ export default function ProfileEditor() {
         notes: values.notes ?? '',
         fingerprint: values.fingerprint,
       };
+      if (cookiesPayload !== undefined) payload.cookies = cookiesPayload;
 
       if (isEdit && id) {
         await api.profile.update({ id, ...payload });
@@ -385,6 +431,45 @@ export default function ProfileEditor() {
     label: `${p.name} (${p.marketShare}%)`,
     value: p.id,
   })), [presets]);
+
+  // Live re-parse the cookie textarea (debounced via React batching). This
+  // drives the preview card; saving re-parses independently.
+  useEffect(() => {
+    const trimmed = rawCookies.trim();
+    if (!trimmed) {
+      setCookieParsed(null);
+      return;
+    }
+    setCookieParsed(parseCookieJson(trimmed));
+  }, [rawCookies]);
+
+  const cookieDomains = useMemo(
+    () => (cookieParsed ? summarizeCookies(cookieParsed.cookies) : []),
+    [cookieParsed],
+  );
+
+  const handleCopyCookies = async () => {
+    const trimmed = rawCookies.trim();
+    if (!trimmed) {
+      message.warning('当前没有 Cookies 可复制');
+      return;
+    }
+    const parsed = parseCookieJson(trimmed);
+    const json = JSON.stringify(parsed.cookies, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      message.success(`已复制 ${parsed.cookies.length} 条 Cookies（标准 JSON）`);
+    } catch (err) {
+      message.error('复制失败：' + (err as Error).message);
+    }
+  };
+
+  const handleClearCookies = () => {
+    setRawCookies('');
+    setCookieParsed(null);
+    setStoredCookieCount(0);
+    message.success('已清空，保存后生效');
+  };
 
   return (
     <>
@@ -710,6 +795,147 @@ export default function ProfileEditor() {
                 )}
               </Col>
             </Row>
+          </Card>
+
+          <Card
+            className="editor-card"
+            title={
+              <Space>
+                <CloudUploadOutlined />
+                <span>Cookies（可选）</span>
+                {storedCookieCount > 0 && (
+                  <Tag color="green">已保存 {storedCookieCount} 条</Tag>
+                )}
+              </Space>
+            }
+            extra={
+              <Space>
+                <Button
+                  size="small"
+                  icon={<CopyOutlined />}
+                  onClick={() => void handleCopyCookies()}
+                  disabled={!rawCookies.trim()}
+                >
+                  复制标准 JSON
+                </Button>
+                <Button
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={handleClearCookies}
+                  disabled={!rawCookies.trim() && storedCookieCount === 0}
+                >
+                  清空
+                </Button>
+              </Space>
+            }
+          >
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="支持的格式（自动识别后转为标准 JSON）"
+              description={
+                <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                  <div>
+                    1. <strong>iSO / AdsPower / Bit 风格</strong>：<code>{'{ Name, Value, Domain, Path, Secure, HttpOnly, Persistent, Expires, Samesite, HasExpires, ... }'}</code>
+                  </div>
+                  <div>
+                    2. <strong>EditThisCookie / Cookie-Editor</strong>：<code>{'{ name, value, domain, path, secure, httpOnly, sameSite, expirationDate }'}</code>
+                  </div>
+                  <div>
+                    3. <strong>Playwright JSON</strong>：<code>{'{ name, value, domain, path, expires, secure, httpOnly, sameSite }'}</code>
+                  </div>
+                  <div style={{ marginTop: 6, color: '#888' }}>
+                    粘贴后会自动去重（同 domain+path 同 name 取首条）。每次启动浏览器前会自动注入到 Context，无需登录。
+                  </div>
+                </div>
+              }
+            />
+            <Form.Item label="粘贴 Cookies JSON">
+              <Input.TextArea
+                rows={6}
+                value={rawCookies}
+                onChange={(e) => setRawCookies(e.target.value)}
+                placeholder='[{"Name":"sessionid","Value":"abc...","Domain":".example.com","Path":"/","Secure":true,"HttpOnly":true,"Persistent":"1","HasExpires":"1","Expires":"2026-12-31T00:00:00+08:00","Samesite":"1"}]'
+                style={{ fontFamily: 'monospace', fontSize: 12 }}
+              />
+            </Form.Item>
+
+            {cookieParsed && (
+              <Card size="small" style={{ background: '#fafafa' }}>
+                <Row gutter={16} align="middle">
+                  <Col span={6}>
+                    <Statistic
+                      title="识别条目"
+                      value={cookieParsed.cookies.length}
+                      valueStyle={{ color: cookieParsed.cookies.length > 0 ? '#52c41a' : '#999' }}
+                    />
+                  </Col>
+                  <Col span={6}>
+                    <Statistic
+                      title="跳过 / 错误"
+                      value={cookieParsed.errors.length}
+                      valueStyle={{ color: cookieParsed.errors.length > 0 ? '#ff4d4f' : '#999' }}
+                    />
+                  </Col>
+                  <Col span={6}>
+                    <Statistic
+                      title="涉及域名"
+                      value={cookieDomains.length}
+                    />
+                  </Col>
+                  <Col span={6}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>识别格式</Typography.Text>
+                    <div>
+                      <Tag color={
+                        cookieParsed.format === 'iso' ? 'gold' :
+                        cookieParsed.format === 'standard' ? 'blue' :
+                        cookieParsed.format === 'mixed' ? 'purple' : 'default'
+                      }>
+                        {
+                          cookieParsed.format === 'iso' ? 'iSO / AdsPower' :
+                          cookieParsed.format === 'standard' ? '标准 JSON' :
+                          cookieParsed.format === 'mixed' ? '混合' : '未识别'
+                        }
+                      </Tag>
+                    </div>
+                  </Col>
+                </Row>
+                {cookieDomains.length > 0 && (
+                  <>
+                    <Divider style={{ margin: '12px 0 8px' }} />
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>按域名分布：</Typography.Text>
+                    <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {cookieDomains.slice(0, 30).map((d) => (
+                        <Tag key={d.domain}>
+                          {d.domain} <strong>×{d.count}</strong>
+                        </Tag>
+                      ))}
+                      {cookieDomains.length > 30 && (
+                        <Tag color="default">…还有 {cookieDomains.length - 30} 个域名</Tag>
+                      )}
+                    </div>
+                  </>
+                )}
+                {cookieParsed.errors.length > 0 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginTop: 12 }}
+                    message={`${cookieParsed.errors.length} 条无法识别（已自动忽略）`}
+                    description={
+                      <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
+                        {cookieParsed.errors.slice(0, 5).map((e, i) => (
+                          <li key={i}>{e}</li>
+                        ))}
+                        {cookieParsed.errors.length > 5 && <li>…</li>}
+                      </ul>
+                    }
+                  />
+                )}
+              </Card>
+            )}
           </Card>
 
           <Card className="editor-card" title="指纹参数">

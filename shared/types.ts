@@ -143,6 +143,13 @@ export interface Profile {
   createdAt: number;
   lastOpenedAt?: number | null;
   notes?: string;
+  /**
+   * Pre-injected cookies (BrowserCookie[]). Stored as JSON so we keep schema
+   * flexible; parsed by `shared/cookieFormats.ts`. Imported once via the
+   * editor's "Cookies" tab and replayed into the BrowserContext on every
+   * launch via `context.addCookies()`.
+   */
+  cookies?: string;
 }
 
 export interface ProfileGroup {
@@ -173,6 +180,7 @@ export interface CreateProfileInput {
   fingerprint?: FingerprintConfig;
   proxyId?: string | null;
   notes?: string;
+  cookies?: string;
 }
 
 export interface UpdateProfileInput {
@@ -183,4 +191,5 @@ export interface UpdateProfileInput {
   fingerprint?: FingerprintConfig;
   proxyId?: string | null;
   notes?: string;
+  cookies?: string;
 }

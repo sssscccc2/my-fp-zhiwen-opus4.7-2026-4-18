@@ -7,6 +7,7 @@ import { buildLaunchOptions } from './fingerprintBuilder.js';
 import { getProfile, markProfileOpened } from './profileService.js';
 import { getProxy, testProxy } from './proxyService.js';
 import { needsBridge, startBridge, stopBridge } from './proxyBridge.js';
+import { parseCookieJson, toPlaywrightCookies } from '@shared/cookieFormats';
 
 interface RunningBrowser {
   profileId: string;
@@ -22,6 +23,7 @@ type CloakLaunchModule = {
     close: () => Promise<void>;
     pages?: () => unknown[];
     newPage?: () => Promise<unknown>;
+    addCookies?: (cookies: Array<Record<string, unknown>>) => Promise<void>;
   }>;
   ensureBinary?: () => Promise<string>;
   binaryInfo?: () => {
@@ -425,6 +427,25 @@ export async function launchProfile(profileId: string): Promise<LaunchedBrowserI
       running.delete(profileId);
       void stopBridge(profileId);
     });
+  }
+
+  // Replay user-provided cookies BEFORE the first page is opened so that the
+  // landing page sees them on its very first request. This is what makes
+  // pasted-from-AdsPower sessions "just work" without re-login.
+  if (profile.cookies && profile.cookies.trim() && typeof context.addCookies === 'function') {
+    try {
+      const parsed = parseCookieJson(profile.cookies);
+      if (parsed.cookies.length > 0) {
+        await context.addCookies(toPlaywrightCookies(parsed.cookies));
+        console.log(`[launcher] injected ${parsed.cookies.length} cookies for profile ${profileId}`);
+      }
+      if (parsed.errors.length > 0) {
+        // Non-fatal — we report counts so the user sees them in the dev console.
+        console.warn(`[launcher] ${parsed.errors.length} cookies skipped during inject:`, parsed.errors.slice(0, 3));
+      }
+    } catch (err) {
+      console.warn('[launcher] cookie injection failed (continuing without):', (err as Error).message);
+    }
   }
 
   if (typeof context.newPage === 'function') {
