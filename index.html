@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      connect-src 允许 http: + https: + ws: — 因为：
+      1) 认证服务器走 http (默认 http://146.190.45.66:3000)
+      2) 代理测试 / 指纹检测会请求 https 第三方站点
+      3) Vite HMR 在开发环境走 ws
+      img-src 同样允许 http: 用于代理测试时显示图片
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; connect-src 'self' http: https: ws: wss:;" />
+    <title>天胡6金</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

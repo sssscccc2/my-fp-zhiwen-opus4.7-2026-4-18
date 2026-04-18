@@ -1,0 +1,3 @@
+# 此目录用于存放打包时的额外资源
+# Electron-builder 会将整个目录复制到 release/<platform>-unpacked/resources/
+# 第二阶段：可放置离线 cloakbrowser 二进制 / 国内镜像配置等

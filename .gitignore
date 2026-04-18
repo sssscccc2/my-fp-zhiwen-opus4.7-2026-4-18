@@ -1,0 +1,39 @@
+# --- Build artifacts ---
+node_modules/
+out/
+release/
+dist/
+build.log
+*.log
+
+# --- Editor / OS ---
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db
+
+# --- Runtime data ---
+userdata/
+profiles/
+*.db
+*.db-journal
+
+# --- Heavy binaries (excluded; user re-extracts on new machine) ---
+# CloakBrowser patched Chromium (~526MB) — distribute via Releases or
+# tell users to drop it into resources/cloakbrowser-windows-x64/ themselves.
+resources/cloakbrowser-windows-x64/
+resources/cloakbrowser-darwin-*/
+resources/cloakbrowser-linux-*/
+bin/cloakbrowser/
+*.zip
+
+# --- Cursor/AI tooling ---
+.cursor/
+agent-tools/
+terminals/
+
+# --- Misc ---
+.env
+.env.local
+*.bak
+*.bak.*

@@ -1,0 +1,108 @@
+{
+  "name": "tianhu6jin",
+  "version": "0.1.0",
+  "description": "天胡6金 - 指纹浏览器，多账号矩阵管理",
+  "main": "out/main/index.cjs",
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "prebuild": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview",
+    "package": "electron-vite build && electron-builder --win --x64",
+    "package:portable": "electron-vite build && electron-builder --win --x64 -c.win.target=portable",
+    "package:dir": "electron-vite build && electron-builder --win --x64 --dir",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
+  },
+  "dependencies": {
+    "cloakbrowser": "^0.3.24",
+    "dns-packet": "^5.6.1",
+    "mmdb-lib": "^3.0.2",
+    "playwright-core": "^1.59.1",
+    "proxy-chain": "^2.7.1",
+    "socks": "^2.8.7",
+    "socks-proxy-agent": "^10.0.0",
+    "sql.js": "^1.11.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@ant-design/icons": "^5.5.1",
+    "@types/node": "^22.7.5",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@types/sql.js": "^1.4.9",
+    "@vitejs/plugin-react": "^4.3.2",
+    "antd": "^5.21.4",
+    "electron": "^32.1.2",
+    "electron-builder": "^25.0.5",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.8",
+    "zustand": "^5.0.0"
+  },
+  "build": {
+    "appId": "com.tianhu6jin.app",
+    "productName": "天胡6金",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!resources/cloakbrowser-windows-x64/**",
+      "!resources/cloakbrowser-darwin-*/**",
+      "!resources/cloakbrowser-linux-*/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/cloakbrowser-windows-x64",
+        "to": "cloakbrowser-windows-x64",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/presets",
+        "to": "presets",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "TianHu6Jin-${version}-Setup.${ext}",
+      "executableName": "TianHu6Jin"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "天胡6金",
+      "artifactName": "TianHu6Jin-${version}-Setup.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "TianHu6Jin-${version}-Portable.${ext}"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/sql.js/dist/sql-wasm.wasm"
+    ],
+    "compression": "maximum"
+  }
+}

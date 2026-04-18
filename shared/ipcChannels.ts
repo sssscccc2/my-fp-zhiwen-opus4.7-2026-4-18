@@ -1,0 +1,48 @@
+export const IPC = {
+  Profile: {
+    List: 'profile:list',
+    Get: 'profile:get',
+    Create: 'profile:create',
+    Update: 'profile:update',
+    Delete: 'profile:delete',
+    Clone: 'profile:clone',
+    Launch: 'profile:launch',
+    Close: 'profile:close',
+    ListRunning: 'profile:listRunning',
+  },
+  Group: {
+    List: 'group:list',
+    Create: 'group:create',
+    Update: 'group:update',
+    Delete: 'group:delete',
+  },
+  Proxy: {
+    List: 'proxy:list',
+    Create: 'proxy:create',
+    Update: 'proxy:update',
+    Delete: 'proxy:delete',
+    Test: 'proxy:test',
+    TestAll: 'proxy:testAll',
+    Parse: 'proxy:parse',
+    TestAdhoc: 'proxy:testAdhoc',
+  },
+  Preset: {
+    List: 'preset:list',
+    Random: 'preset:random',
+  },
+  FingerprintTest: {
+    Run: 'fpTest:run',
+  },
+  System: {
+    OpenDir: 'sys:openDir',
+    AppInfo: 'sys:appInfo',
+    OpenExternal: 'sys:openExternal',
+  },
+  Binary: {
+    Status: 'binary:status',
+    Download: 'binary:download',
+    Progress: 'binary:progress',
+    PickZip: 'binary:pickZip',
+    ImportZip: 'binary:importZip',
+  },
+} as const;
