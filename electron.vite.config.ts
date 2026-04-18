@@ -40,10 +40,17 @@ export default defineConfig({
     },
   },
   renderer: {
-    root: '.',
+    // Use __dirname so root and input are consistently in the same physical
+    // path. When the project lives behind a junction (e.g. C:\fp-browser-dev →
+    // a Chinese-character path), `root: '.'` resolves via process.cwd() which
+    // gives the junction, while `__dirname` resolves to the real path. Vite's
+    // build-html plugin then tries to compute a relative path between the
+    // input and the root, gets "../..", and aborts with
+    // "fileName must be strings that are neither absolute nor relative paths".
+    root: __dirname,
     plugins: [react()],
     build: {
-      outDir: 'out/renderer',
+      outDir: resolve(__dirname, 'out/renderer'),
       sourcemap: false,
       rollupOptions: {
         input: { index: resolve(__dirname, 'index.html') },
