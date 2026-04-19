@@ -10,6 +10,7 @@ import type {
   UpdateProfileInput,
   LaunchedBrowserInfo,
 } from '@shared/types';
+import type { SyncStatus, SyncResult, SyncProgress } from '@shared/syncTypes';
 
 interface IpcSuccess<T> { ok: true; data: T }
 interface IpcError { ok: false; error: string }
@@ -88,6 +89,13 @@ declare global {
         }>>;
         onProgress: (cb: (line: string) => void) => () => void;
       };
+      sync: {
+        status: (server: string, token: string) => Promise<IpcResult<SyncStatus>>;
+        upload: (server: string, token: string) => Promise<IpcResult<SyncResult>>;
+        download: (server: string, token: string) => Promise<IpcResult<SyncResult>>;
+        deleteRemote: (server: string, token: string, profileId: string) => Promise<IpcResult<void>>;
+        onProgress: (cb: (p: SyncProgress) => void) => () => void;
+      };
     };
   }
 }
@@ -144,5 +152,13 @@ export const api = {
     pickZip: () => call(window.api.binary.pickZip()),
     importZip: (zipPath: string) => call(window.api.binary.importZip(zipPath)),
     onProgress: (cb: (line: string) => void) => window.api.binary.onProgress(cb),
+  },
+  sync: {
+    status: (server: string, token: string) => call(window.api.sync.status(server, token)),
+    upload: (server: string, token: string) => call(window.api.sync.upload(server, token)),
+    download: (server: string, token: string) => call(window.api.sync.download(server, token)),
+    deleteRemote: (server: string, token: string, profileId: string) =>
+      call(window.api.sync.deleteRemote(server, token, profileId)),
+    onProgress: (cb: (p: SyncProgress) => void) => window.api.sync.onProgress(cb),
   },
 };

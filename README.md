@@ -7,6 +7,56 @@
 
 ## 更新日志
 
+### v0.3.0 — 云同步（多端账号同步）（2026-04-19）
+
+新增「**整账号云同步**」功能 — 在另一台电脑安装本程序、用同一账号登录，一键把所有窗口（含 cookies / 扩展 / 本地存储）拉过去，无需手动复制目录。
+
+**架构**
+
+- 客户端 → 服务端走原有的认证服务器（`146.190.45.66:3000`），新加一组 `/api/sync/*` REST API
+- 服务端按用户隔离存储于 `/opt/fp-browser-auth/sync-data/<用户名>/`：
+  - `snapshot.json` — 元数据（窗口列表、分组、代理）
+  - `manifests/<id>.json` — 每窗口的文件清单（路径 + sha256 + 大小）
+  - `blobs/<sha[:2]>/<sha>` — 实际文件内容，**SHA-256 内容寻址** + **跨用户无关字段去重**
+- 同步范围由 `shared/profileWhitelist.ts` 白名单决定：Cookies / Local Storage / IndexedDB / Extensions / Preferences / Bookmarks / Login Data… 排除一切磁盘缓存（GPU Cache / Code Cache / Service Worker）
+
+**功能要点**
+
+- 主页右上角「**云同步**」按钮，5 种状态自动识别：`已同步 / 需要上传 / 云端更新 / 存在冲突 / 尚未同步`
+- **手动触发** — 点按钮才传，不静默后台同步
+- **增量上传** — 用 sha256 对比，第二次同步只传变化的文件，相同内容自动复用云端已有 blob
+- **覆盖式冲突** — 多端冲突时弹窗警告"将覆盖云端 / 覆盖本地"，由用户选择哪边为准
+- **删除联动** — 客户端删窗口时自动通知服务器清理 manifest + GC 引用计数为 0 的 blob
+- **进度可视化** — 扫描 / 上传 / 下载实时进度条 + 当前文件名
+- **配额限制** — 每用户 500 MB / 单文件 50 MB（超限服务器返回 `QUOTA_EXCEEDED` 拒绝）
+
+**管理后台增强**（`http://<server>:3000/admin`）
+
+- 新增「**窗口管理**」Tab，admin 能看到所有用户已上传的窗口
+- 一键 **转移窗口** 给其他用户（manifest 移动 + 引用 blob 复制 + 源端 GC，操作幂等）
+
+**安全性**
+
+- 不加密传输（HTTP）— token 鉴权 + 用户名空间隔离 + path traversal 防护
+- 不影响指纹反检测：纯应用层数据搬运，与 Chromium 内核 / Cookies 注入完全正交
+
+**新增文件**
+
+| 路径 | 用途 |
+|---|---|
+| `shared/syncTypes.ts` | 同步协议类型定义 |
+| `shared/profileWhitelist.ts` | 文件同步白名单 + 黑名单 |
+| `electron/main/services/syncEngine.ts` | 主进程同步引擎（扫描 + hash + 上传下载） |
+| `src/lib/syncClient.ts` | 渲染端 IPC 封装 |
+| `src/components/SyncWidget.tsx` | 主页右上角同步按钮组件 |
+| `auth-server/server.js` | 服务端 `/api/sync/*` 路由 + 管理后台窗口管理 Tab |
+
+**跨电脑迁移流程**
+
+1. 旧电脑：登录 → 主页 → 云同步 → 上传到云端
+2. 新电脑：安装本程序 → 用**相同账号**登录 → 云同步 → 从云端下载
+3. 完成 — 所有窗口（含登录状态）都搬过来了
+
 ### v0.2.0 — Cookies 导入注入（2026-04-18）
 
 新增「**每个窗口独立的 Cookies 注入**」功能，专为接管异地账号 / 迁移会话设计。

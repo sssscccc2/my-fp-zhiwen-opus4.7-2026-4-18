@@ -45,4 +45,11 @@ export const IPC = {
     PickZip: 'binary:pickZip',
     ImportZip: 'binary:importZip',
   },
+  Sync: {
+    Status: 'sync:status',
+    Upload: 'sync:upload',
+    Download: 'sync:download',
+    DeleteRemote: 'sync:deleteRemote',
+    Progress: 'sync:progress',
+  },
 } as const;

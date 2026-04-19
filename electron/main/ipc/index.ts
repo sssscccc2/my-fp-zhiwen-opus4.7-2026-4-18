@@ -13,6 +13,13 @@ import {
   launchProfile, closeProfile, listRunning, runFingerprintTest, isCloakAvailable,
   ensureCloakBinary, getCloakBinaryStatus, getCloakCacheDir, importCloakBinaryZip,
 } from '../services/browserLauncher.js';
+import {
+  getStatus as syncGetStatus,
+  uploadAll as syncUploadAll,
+  downloadAll as syncDownloadAll,
+  deleteRemoteProfile as syncDeleteRemoteProfile,
+} from '../services/syncEngine.js';
+import type { SyncProgress } from '@shared/syncTypes';
 
 interface IpcSuccess<T> { ok: true; data: T }
 interface IpcError { ok: false; error: string }
@@ -139,5 +146,27 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.Binary.ImportZip, wrap(async (zipPath: string) => {
     return importCloakBinaryZip(zipPath, broadcastBinaryProgress);
+  }));
+
+  // ---- Cloud sync ----
+  // The sync engine emits progress events; we broadcast them so any open
+  // window (e.g. a sync settings page or sidebar status badge) can subscribe.
+  const broadcastSyncProgress = (p: SyncProgress) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      w.webContents.send(IPC.Sync.Progress, p);
+    }
+  };
+
+  ipcMain.handle(IPC.Sync.Status, wrap(async (server: string, token: string) => {
+    return syncGetStatus(server, token);
+  }));
+  ipcMain.handle(IPC.Sync.Upload, wrap(async (server: string, token: string) => {
+    return syncUploadAll(server, token, broadcastSyncProgress);
+  }));
+  ipcMain.handle(IPC.Sync.Download, wrap(async (server: string, token: string) => {
+    return syncDownloadAll(server, token, broadcastSyncProgress);
+  }));
+  ipcMain.handle(IPC.Sync.DeleteRemote, wrap(async (server: string, token: string, profileId: string) => {
+    return syncDeleteRemoteProfile(server, token, profileId);
   }));
 }

@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { fireDataChanged, useDataReload } from '../lib/dataBus';
+import SyncWidget from '../components/SyncWidget';
 import type { Profile, ProfileGroup, ProxyConfig, LaunchedBrowserInfo } from '@shared/types';
 
 type ViewMode = 'table' | 'card';
@@ -97,13 +98,21 @@ export default function ProfileList() {
   const handleDelete = (p: Profile) => {
     modal.confirm({
       title: `确定删除"${p.name}"？`,
-      content: '配置文件及其所有 cookies / 缓存数据都将被永久删除。',
+      content: '配置文件及其所有 cookies / 缓存数据都将被永久删除。如果云端有备份，下次同步时也会一并移除。',
       okText: '删除',
       okType: 'danger',
       cancelText: '取消',
       onOk: async () => {
         try {
           await api.profile.delete(p.id, true);
+          // Best-effort: also tell the server to drop the remote copy so it
+          // doesn't keep occupying quota or reappear on next download.
+          try {
+            const { deleteRemote } = await import('../lib/syncClient');
+            await deleteRemote(p.id);
+          } catch {
+            // user might not be logged in / sync might not be set up — ignore
+          }
           message.success('已删除');
           fireDataChanged();
         } catch (err) {
@@ -291,6 +300,7 @@ export default function ProfileList() {
           </Typography.Text>
         </h2>
         <Space>
+          <SyncWidget />
           <Radio.Group value={view} onChange={(e) => setView(e.target.value)} optionType="button" size="middle">
             <Radio.Button value="table"><UnorderedListOutlined /></Radio.Button>
             <Radio.Button value="card"><AppstoreOutlined /></Radio.Button>

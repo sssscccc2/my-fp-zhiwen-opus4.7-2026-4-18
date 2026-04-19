@@ -55,6 +55,18 @@ const api = {
       return () => ipcRenderer.removeListener(IPC.Binary.Progress, handler);
     },
   },
+  sync: {
+    status: (server: string, token: string) => invoke(IPC.Sync.Status, server, token),
+    upload: (server: string, token: string) => invoke(IPC.Sync.Upload, server, token),
+    download: (server: string, token: string) => invoke(IPC.Sync.Download, server, token),
+    deleteRemote: (server: string, token: string, profileId: string) =>
+      invoke(IPC.Sync.DeleteRemote, server, token, profileId),
+    onProgress: (cb: (p: unknown) => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, p: unknown) => cb(p);
+      ipcRenderer.on(IPC.Sync.Progress, handler);
+      return () => ipcRenderer.removeListener(IPC.Sync.Progress, handler);
+    },
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);

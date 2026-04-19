@@ -11,7 +11,14 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const SINGBOX_BIN = '/usr/local/bin/sing-box';
 const RELAY_DIR = path.join(DATA_DIR, 'relays');
+const SYNC_DIR = path.join(DATA_DIR, 'sync-data');
 const PORT = 3000;
+
+// 2026-04-19: cloud sync limits — keep these in lockstep with shared/syncTypes.ts
+const SYNC_QUOTA_BYTES = 500 * 1024 * 1024;        // 500 MB / user hard cap
+const SYNC_MAX_FILE_BYTES = 50 * 1024 * 1024;      // 50 MB / single file
+const SNAPSHOT_MAX_BYTES = 5 * 1024 * 1024;        // 5 MB cap on the metadata JSON itself
+const MANIFEST_MAX_BYTES = 5 * 1024 * 1024;
 
 const activeRelays = new Map();
 
@@ -32,10 +39,12 @@ function saveSessions(s) { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(s, nul
 function hashPwd(p) { return crypto.createHash('sha256').update(p).digest('hex'); }
 function genToken() { return crypto.randomBytes(32).toString('hex'); }
 
-function parseBody(req) {
+function parseBody(req, maxBytes = 8 * 1024 * 1024) {
+  // 2026-04-19: bumped from 1 MB → 8 MB so cloud-sync snapshots / manifests
+  // (capped at 5 MB each on the route layer) fit comfortably.
   return new Promise((resolve) => {
     let b = '';
-    req.on('data', c => { b += c; if (b.length > 1e6) req.destroy(); });
+    req.on('data', c => { b += c; if (b.length > maxBytes) req.destroy(); });
     req.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve({}); } });
   });
 }
@@ -262,6 +271,178 @@ async function stopRelay(relayId) {
   activeRelays.delete(relayId);
 }
 
+// ---- Cloud sync storage helpers ----
+fs.mkdirSync(SYNC_DIR, { recursive: true });
+
+function safeUserDir(username) {
+  // Defense-in-depth: prevent path traversal even though the auth layer
+  // already validates usernames as [a-zA-Z0-9_-]+.
+  if (!/^[a-zA-Z0-9_-]+$/.test(username)) throw new Error('invalid username');
+  return path.join(SYNC_DIR, username);
+}
+function ensureUserSyncDir(username) {
+  const dir = safeUserDir(username);
+  fs.mkdirSync(path.join(dir, 'manifests'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'blobs'), { recursive: true });
+  return dir;
+}
+function snapshotPath(username) { return path.join(safeUserDir(username), 'snapshot.json'); }
+function manifestPath(username, profileId) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(profileId)) throw new Error('invalid profileId');
+  return path.join(safeUserDir(username), 'manifests', profileId + '.json');
+}
+function blobPathFor(username, sha) {
+  const sub = sha.slice(0, 2);
+  return path.join(safeUserDir(username), 'blobs', sub, sha);
+}
+function blobExists(username, sha) {
+  try { return fs.statSync(blobPathFor(username, sha)).isFile(); } catch { return false; }
+}
+function readSnapshot(username) {
+  try {
+    const t = fs.readFileSync(snapshotPath(username), 'utf-8');
+    return JSON.parse(t);
+  } catch { return null; }
+}
+function readManifest(username, profileId) {
+  try {
+    const t = fs.readFileSync(manifestPath(username, profileId), 'utf-8');
+    return JSON.parse(t);
+  } catch { return null; }
+}
+function writeFileAtomic(p, content) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  const tmp = p + '.tmp-' + crypto.randomBytes(4).toString('hex');
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, p);
+}
+function listManifests(username) {
+  const dir = path.join(safeUserDir(username), 'manifests');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')); } catch { return null; }
+  }).filter(Boolean);
+}
+function computeQuota(username) {
+  const dir = path.join(safeUserDir(username), 'blobs');
+  let used = 0, blobs = 0;
+  if (fs.existsSync(dir)) {
+    for (const sub of fs.readdirSync(dir)) {
+      const subDir = path.join(dir, sub);
+      if (!fs.statSync(subDir).isDirectory()) continue;
+      for (const f of fs.readdirSync(subDir)) {
+        try {
+          const st = fs.statSync(path.join(subDir, f));
+          if (st.isFile()) { used += st.size; blobs++; }
+        } catch {}
+      }
+    }
+  }
+  return { used, limit: SYNC_QUOTA_BYTES, blobs };
+}
+function gcOrphans(username) {
+  // Delete any blob no longer referenced by any manifest, and any manifest
+  // not listed in the snapshot.
+  const snap = readSnapshot(username);
+  const liveProfileIds = new Set((snap?.profiles || []).map(p => p.profile?.id).filter(Boolean));
+  const dir = safeUserDir(username);
+  const manifestsDir = path.join(dir, 'manifests');
+  if (fs.existsSync(manifestsDir)) {
+    for (const f of fs.readdirSync(manifestsDir)) {
+      if (!f.endsWith('.json')) continue;
+      const pid = f.slice(0, -5);
+      if (!liveProfileIds.has(pid)) {
+        try { fs.unlinkSync(path.join(manifestsDir, f)); } catch {}
+      }
+    }
+  }
+  // Now collect every sha referenced by any *surviving* manifest.
+  const live = new Set();
+  for (const m of listManifests(username)) {
+    for (const f of m.files || []) if (f && f.sha256) live.add(f.sha256);
+  }
+  const blobsDir = path.join(dir, 'blobs');
+  if (!fs.existsSync(blobsDir)) return;
+  let removed = 0;
+  for (const sub of fs.readdirSync(blobsDir)) {
+    const subDir = path.join(blobsDir, sub);
+    if (!fs.statSync(subDir).isDirectory()) continue;
+    for (const f of fs.readdirSync(subDir)) {
+      if (!live.has(f)) {
+        try { fs.unlinkSync(path.join(subDir, f)); removed++; } catch {}
+      }
+    }
+  }
+  if (removed > 0) console.log(`[sync] gc removed ${removed} orphan blobs for ${username}`);
+}
+function transferProfile(fromUser, toUser, profileId) {
+  // Move the manifest + the snapshot entry from fromUser to toUser.
+  // Blobs are *copied* (we don't mess with the source user's references).
+  const srcSnap = readSnapshot(fromUser);
+  if (!srcSnap) throw new Error('源用户没有同步记录');
+  const idx = (srcSnap.profiles || []).findIndex(p => p.profile?.id === profileId);
+  if (idx < 0) throw new Error('源用户中找不到该窗口');
+  const entry = srcSnap.profiles.splice(idx, 1)[0];
+
+  // Source-side proxy: copy if referenced and not already in dest.
+  const dstSnap = readSnapshot(toUser) || { schemaVersion: 1, username: toUser, uploadedAt: 0, profiles: [], groups: [], proxies: [] };
+  if (entry.profile?.proxyId) {
+    const px = (srcSnap.proxies || []).find(p => p.id === entry.profile.proxyId);
+    if (px && !(dstSnap.proxies || []).find(p => p.id === px.id)) {
+      dstSnap.proxies = [...(dstSnap.proxies || []), px];
+    }
+  }
+  // Group: copy if referenced and not already in dest.
+  if (entry.profile?.groupId) {
+    const gp = (srcSnap.groups || []).find(g => g.id === entry.profile.groupId);
+    if (gp && !(dstSnap.groups || []).find(g => g.id === gp.id)) {
+      dstSnap.groups = [...(dstSnap.groups || []), gp];
+    }
+  }
+
+  ensureUserSyncDir(toUser);
+
+  // Move manifest file.
+  const srcManifest = manifestPath(fromUser, profileId);
+  const dstManifest = manifestPath(toUser, profileId);
+  let copiedFiles = 0;
+  if (fs.existsSync(srcManifest)) {
+    const m = JSON.parse(fs.readFileSync(srcManifest, 'utf-8'));
+    // Copy referenced blobs to destination (dedup by hash within destination).
+    for (const f of m.files || []) {
+      if (!f || !f.sha256) continue;
+      const src = blobPathFor(fromUser, f.sha256);
+      const dst = blobPathFor(toUser, f.sha256);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+        copiedFiles++;
+      }
+    }
+    fs.copyFileSync(srcManifest, dstManifest);
+    fs.unlinkSync(srcManifest);
+  }
+
+  // Add to destination snapshot, write both back.
+  dstSnap.profiles.push(entry);
+  dstSnap.uploadedAt = Date.now();
+  writeFileAtomic(snapshotPath(toUser), JSON.stringify(dstSnap));
+
+  srcSnap.uploadedAt = Date.now();
+  writeFileAtomic(snapshotPath(fromUser), JSON.stringify(srcSnap));
+
+  // GC source user's now-orphaned blobs.
+  gcOrphans(fromUser);
+
+  return {
+    transferred: profileId,
+    fromUser, toUser,
+    copiedBlobs: copiedFiles,
+    fromQuota: computeQuota(fromUser),
+    toQuota: computeQuota(toUser),
+  };
+}
+
 const ADMIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -319,6 +500,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Micr
 .modal .form-group:last-of-type{margin-bottom:20px}
 .modal-actions{display:flex;gap:8px;justify-content:flex-end}
 
+.tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid #333340}
+.tab-btn{padding:10px 18px;background:transparent;border:none;color:#9898a8;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;font-family:inherit;transition:all .15s}
+.tab-btn:hover{color:#e8e8ed}
+.tab-btn.active{color:#6366f1;border-bottom-color:#6366f1;font-weight:600}
+.tab-pane{display:none}
+.tab-pane.active{display:block}
+.size-bar{display:inline-block;width:80px;height:6px;background:#333340;border-radius:3px;margin-right:8px;vertical-align:middle;overflow:hidden}
+.size-bar-fill{display:block;height:100%;background:#6366f1}
 .toast-box{position:fixed;bottom:24px;right:24px;z-index:2000}
 .toast{padding:12px 20px;border-radius:8px;font-size:13px;margin-top:8px;animation:slideUp .2s}
 .toast-ok{background:#065f46;color:#d1fae5}
@@ -358,10 +547,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Micr
       <div class="stat-card"><div class="stat-num" id="stat-online">0</div><div class="stat-label">在线</div></div>
     </div>
 
-    <table class="table">
-      <thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>在线</th><th>注册时间</th><th>操作</th></tr></thead>
-      <tbody id="user-tbody"></tbody>
-    </table>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="users">用户管理</button>
+      <button class="tab-btn" data-tab="windows">窗口管理</button>
+    </div>
+
+    <div class="tab-pane active" id="tab-users">
+      <table class="table">
+        <thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>在线</th><th>注册时间</th><th>操作</th></tr></thead>
+        <tbody id="user-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="tab-pane" id="tab-windows">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:13px;color:#9898a8">所有用户已同步到云端的窗口（按用户分组，可转移到其他用户）</div>
+        <button class="btn btn-ghost btn-sm" id="btn-refresh-windows">刷新</button>
+      </div>
+      <table class="table">
+        <thead><tr><th>用户</th><th>窗口名称</th><th>分组</th><th>大小</th><th>最后同步</th><th>操作</th></tr></thead>
+        <tbody id="window-tbody"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -378,6 +585,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Micr
     <div class="modal-actions">
       <button class="btn btn-ghost btn-sm" onclick="$('#modal-reset').classList.remove('active')">取消</button>
       <button class="btn btn-primary btn-sm" id="btn-do-reset">确认重置</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-transfer">
+  <div class="modal">
+    <h3>转移窗口到其他用户</h3>
+    <div class="form-group">
+      <label class="form-label">窗口: <strong id="transfer-name"></strong></label>
+    </div>
+    <div class="form-group">
+      <label class="form-label">来源用户: <strong id="transfer-from"></strong></label>
+    </div>
+    <div class="form-group">
+      <label class="form-label">目标用户</label>
+      <select class="form-input" id="transfer-to"></select>
+    </div>
+    <div style="font-size:12px;color:#f59e0b;margin-bottom:16px">
+      转移后该窗口会从来源用户的列表中移除，下次目标用户同步时会拉取到。
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost btn-sm" onclick="$('#modal-transfer').classList.remove('active')">取消</button>
+      <button class="btn btn-primary btn-sm" id="btn-do-transfer">确认转移</button>
     </div>
   </div>
 </div>
@@ -487,6 +717,80 @@ $('#btn-login').addEventListener('click',login);
 $('#login-pass').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 $('#login-user').addEventListener('keydown',e=>{if(e.key==='Enter')$('#login-pass').focus()});
 $('#btn-logout').addEventListener('click',()=>{TOKEN='';localStorage.clear();location.reload()});
+
+// ---- Tabs ----
+document.querySelectorAll('.tab-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
+    if(btn.dataset.tab==='windows') loadWindows();
+  });
+});
+$('#btn-refresh-windows')?.addEventListener('click',loadWindows);
+
+let WINDOWS=[];
+function fmtBytes(n){
+  if(n<1024) return n+' B';
+  if(n<1024*1024) return (n/1024).toFixed(1)+' KB';
+  if(n<1024*1024*1024) return (n/1024/1024).toFixed(1)+' MB';
+  return (n/1024/1024/1024).toFixed(2)+' GB';
+}
+function fmtTime(t){
+  if(!t) return '—';
+  const d=new Date(t),now=new Date();
+  if(d.toDateString()===now.toDateString()) return d.toTimeString().slice(0,5);
+  return d.toLocaleDateString('zh-CN')+' '+d.toTimeString().slice(0,5);
+}
+async function loadWindows(){
+  try{
+    WINDOWS=await api('/api/sync/admin/list-windows',{},'POST');
+    renderWindows();
+  }catch(e){toast(e.message,false)}
+}
+function renderWindows(){
+  const tb=$('#window-tbody');
+  if(!WINDOWS.length){
+    tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:#666;padding:40px">暂无任何用户上传过窗口</td></tr>';
+    return;
+  }
+  // Group by user for visual block separation
+  const sorted=[...WINDOWS].sort((a,b)=>{
+    if(a.username!==b.username) return a.username.localeCompare(b.username);
+    return (b.filesUploadedAt||0)-(a.filesUploadedAt||0);
+  });
+  tb.innerHTML=sorted.map(w=>{
+    return '<tr>'+
+      '<td><strong>'+esc(w.username)+'</strong></td>'+
+      '<td>'+esc(w.profileName||'(未命名)')+'</td>'+
+      '<td>'+esc(w.groupName||'未分组')+'</td>'+
+      '<td>'+fmtBytes(w.filesBytes||0)+'</td>'+
+      '<td>'+fmtTime(w.filesUploadedAt)+'</td>'+
+      '<td class="actions">'+
+        '<button class="btn btn-primary btn-sm" onclick="openTransfer(\\''+esc(w.username)+'\\',\\''+esc(w.profileId)+'\\',\\''+esc(w.profileName||'').replace(/'/g,"\\\\'")+'\\')">转移</button>'+
+      '</td></tr>';
+  }).join('');
+}
+function openTransfer(fromUser,profileId,name){
+  $('#transfer-name').textContent=name||'(未命名)';
+  $('#transfer-from').textContent=fromUser;
+  const sel=$('#transfer-to');
+  sel.innerHTML='<option value="">请选择目标用户...</option>'+
+    USERS.filter(u=>u.username!==fromUser&&u.enabled).map(u=>'<option value="'+esc(u.username)+'">'+esc(u.username)+'</option>').join('');
+  $('#modal-transfer').classList.add('active');
+  $('#btn-do-transfer').onclick=async()=>{
+    const to=sel.value;
+    if(!to){toast('请选择目标用户',false);return}
+    try{
+      const r=await api('/api/sync/admin/transfer',{fromUser,toUser:to,profileId});
+      toast('已转移到 '+to+'（复制了 '+r.copiedBlobs+' 个文件块）');
+      $('#modal-transfer').classList.remove('active');
+      loadWindows();
+    }catch(e){toast(e.message,false)}
+  };
+}
+window.openTransfer=openTransfer;
 
 (async()=>{
   const t=localStorage.getItem('admin_token');
@@ -627,6 +931,205 @@ const server = http.createServer(async (req, res) => {
       u.password = hashPwd(newPassword);
       saveUsers(users);
       return json(res, 200, { message: '密码已重置' });
+    }
+
+    return json(res, 404, { error: 'Not found' });
+  }
+
+  // ========== Cloud Sync API (requires valid token) ==========
+  // Layout on disk:
+  //   /opt/fp-browser-auth/sync-data/<username>/snapshot.json
+  //   /opt/fp-browser-auth/sync-data/<username>/manifests/<profileId>.json
+  //   /opt/fp-browser-auth/sync-data/<username>/blobs/<sha256[:2]>/<sha256>
+  //
+  // Content-addressed blobs let us dedup identical files (e.g. same `Local
+  // State` across many profiles) without bookkeeping. Garbage collection
+  // happens lazily on profile delete: any blob no longer referenced by any
+  // manifest is unlinked.
+  if (url.startsWith('/api/sync/')) {
+    const sess = getSessionUser(req);
+    if (!sess) return json(res, 401, { error: '需要登录' });
+
+    // Admin endpoints first — they live under /api/sync/admin/* so the
+    // wildcard above catches them with the same auth wrapper.
+    if (url.startsWith('/api/sync/admin/')) {
+      if (sess.role !== 'admin') return json(res, 403, { error: '需要管理员权限' });
+
+      if (url === '/api/sync/admin/list-windows' && req.method === 'POST') {
+        // Walk every user's snapshot and emit one row per profile.
+        const out = [];
+        try {
+          for (const username of fs.existsSync(SYNC_DIR) ? fs.readdirSync(SYNC_DIR) : []) {
+            const snap = readSnapshot(username);
+            if (!snap) continue;
+            for (const rp of snap.profiles || []) {
+              out.push({
+                username,
+                profileId: rp.profile?.id,
+                profileName: rp.profile?.name || '(未命名)',
+                groupName: (snap.groups || []).find(g => g.id === rp.profile?.groupId)?.name,
+                filesBytes: rp.filesBytes || 0,
+                filesUploadedAt: rp.filesUploadedAt || 0,
+              });
+            }
+          }
+        } catch (err) {
+          return json(res, 500, { error: 'admin list failed: ' + err.message });
+        }
+        return json(res, 200, out);
+      }
+
+      if (url === '/api/sync/admin/transfer' && req.method === 'POST') {
+        const { fromUser, toUser, profileId } = await parseBody(req);
+        if (!fromUser || !toUser || !profileId) return json(res, 400, { error: '参数不完整' });
+        if (fromUser === toUser) return json(res, 400, { error: '来源和目标用户相同' });
+        const users = loadUsers();
+        if (!users.find(u => u.username === toUser)) return json(res, 404, { error: '目标用户不存在' });
+        try {
+          const result = transferProfile(fromUser, toUser, profileId);
+          return json(res, 200, result);
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+
+      return json(res, 404, { error: 'Not found' });
+    }
+
+    const username = sess.username;
+    ensureUserSyncDir(username);
+
+    if (url === '/api/sync/quota' && req.method === 'GET') {
+      return json(res, 200, computeQuota(username));
+    }
+
+    if (url === '/api/sync/snapshot' && req.method === 'GET') {
+      const snap = readSnapshot(username);
+      if (!snap) return json(res, 200, { empty: true });
+      return json(res, 200, snap);
+    }
+
+    if (url === '/api/sync/snapshot' && req.method === 'POST') {
+      const body = await parseBody(req);
+      if (!body || typeof body !== 'object') return json(res, 400, { error: '无效的 snapshot' });
+      // Force the username to the session — never trust the client field.
+      body.username = username;
+      body.uploadedAt = Date.now();
+      const text = JSON.stringify(body);
+      if (text.length > SNAPSHOT_MAX_BYTES) {
+        return json(res, 413, { error: `元数据过大 (${(text.length/1024).toFixed(1)} KB > ${SNAPSHOT_MAX_BYTES/1024} KB)` });
+      }
+      writeFileAtomic(snapshotPath(username), text);
+      // Snapshot may shrink the profile list — GC orphan blobs/manifests.
+      gcOrphans(username);
+      return json(res, 200, { ok: true, uploadedAt: body.uploadedAt, quota: computeQuota(username) });
+    }
+
+    if (url === '/api/sync/profile/manifest' && req.method === 'GET') {
+      const u = new URL(req.url, 'http://x');
+      const profileId = u.searchParams.get('profileId');
+      if (!profileId) return json(res, 400, { error: '缺少 profileId' });
+      const m = readManifest(username, profileId);
+      if (!m) return json(res, 200, null);
+      return json(res, 200, m);
+    }
+
+    if (url === '/api/sync/profile/manifest' && req.method === 'POST') {
+      const body = await parseBody(req);
+      if (!body || !body.profileId || !Array.isArray(body.files)) {
+        return json(res, 400, { error: '无效的 manifest' });
+      }
+      const text = JSON.stringify(body);
+      if (text.length > MANIFEST_MAX_BYTES) {
+        return json(res, 413, { error: 'manifest 过大' });
+      }
+      writeFileAtomic(manifestPath(username, body.profileId), text);
+      // Determine which blob hashes are actually needed by this manifest so
+      // the client can ask "which ones do I still need to upload?"
+      const need = body.files
+        .filter(f => f && f.sha256 && !blobExists(username, f.sha256))
+        .map(f => f.sha256);
+      return json(res, 200, { ok: true, needsUpload: need, quota: computeQuota(username) });
+    }
+
+    if (url === '/api/sync/profile/file' && req.method === 'GET') {
+      const u = new URL(req.url, 'http://x');
+      const sha = (u.searchParams.get('sha256') || '').toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(sha)) return json(res, 400, { error: '无效的 sha256' });
+      const p = blobPathFor(username, sha);
+      if (!fs.existsSync(p)) return json(res, 404, { error: '文件不存在于云端' });
+      const stat = fs.statSync(p);
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': stat.size,
+        'Access-Control-Allow-Origin': '*',
+      });
+      fs.createReadStream(p).pipe(res);
+      return;
+    }
+
+    if (url === '/api/sync/profile/file' && req.method === 'POST') {
+      const u = new URL(req.url, 'http://x');
+      const sha = (u.searchParams.get('sha256') || '').toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(sha)) return json(res, 400, { error: '无效的 sha256' });
+      const declared = parseInt(req.headers['content-length'] || '0', 10);
+      if (declared > SYNC_MAX_FILE_BYTES) {
+        return json(res, 413, { error: `单文件超过 ${SYNC_MAX_FILE_BYTES/1024/1024} MB 上限` });
+      }
+      const quota = computeQuota(username);
+      if (quota.used + declared > SYNC_QUOTA_BYTES) {
+        return json(res, 413, { error: '云端存储空间已满，请清理后再试', code: 'QUOTA_EXCEEDED', quota });
+      }
+      const target = blobPathFor(username, sha);
+      if (fs.existsSync(target)) {
+        // Already there — drain the request and ack instantly.
+        req.on('data', () => {});
+        req.on('end', () => json(res, 200, { ok: true, deduped: true }));
+        return;
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      const tmp = target + '.upload-' + crypto.randomBytes(4).toString('hex');
+      const ws = fs.createWriteStream(tmp);
+      const hasher = crypto.createHash('sha256');
+      let received = 0;
+      let aborted = false;
+      req.on('data', (chunk) => {
+        received += chunk.length;
+        if (received > SYNC_MAX_FILE_BYTES) {
+          aborted = true;
+          req.destroy();
+          ws.destroy();
+          try { fs.unlinkSync(tmp); } catch {}
+          return;
+        }
+        hasher.update(chunk);
+        ws.write(chunk);
+      });
+      req.on('end', () => {
+        if (aborted) return;
+        ws.end(() => {
+          const got = hasher.digest('hex');
+          if (got !== sha) {
+            try { fs.unlinkSync(tmp); } catch {}
+            return json(res, 400, { error: 'sha256 校验失败 (got=' + got + ')' });
+          }
+          // Atomic rename so partial files never become live.
+          try { fs.renameSync(tmp, target); }
+          catch (err) { try { fs.unlinkSync(tmp); } catch {} return json(res, 500, { error: 'rename failed: ' + err.message }); }
+          json(res, 200, { ok: true, sha256: sha, size: received, quota: computeQuota(username) });
+        });
+      });
+      req.on('error', () => { try { ws.destroy(); fs.unlinkSync(tmp); } catch {} });
+      return;
+    }
+
+    if (url === '/api/sync/profile/delete' && req.method === 'POST') {
+      const { profileId } = await parseBody(req);
+      if (!profileId) return json(res, 400, { error: '缺少 profileId' });
+      const mp = manifestPath(username, profileId);
+      if (fs.existsSync(mp)) fs.unlinkSync(mp);
+      gcOrphans(username);
+      return json(res, 200, { ok: true, deleted: profileId, quota: computeQuota(username) });
     }
 
     return json(res, 404, { error: 'Not found' });
