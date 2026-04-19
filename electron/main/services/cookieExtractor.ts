@@ -122,8 +122,14 @@ async function getMasterKey(profileDir: string): Promise<Buffer> {
  * Decrypt one `encrypted_value` blob. Returns plaintext UTF-8 string, or
  * `null` if the format is unsupported (e.g. v20 App-Bound Encryption) or
  * decryption fails (caller treats as "skip this cookie").
+ *
+ * IMPORTANT: Since Chromium 116 the plaintext is prefixed with
+ *   SHA256(host_key)  (32 raw bytes)
+ * as an integrity tag — see Chromium CL 4609637 "Bind cookie to its origin
+ * via SHA256 prefix". Callers must pass the cookie's `host_key` so we can
+ * strip (and optionally verify) that prefix; pass `null` for legacy data.
  */
-function decryptCookieValue(blob: Buffer, key: Buffer): string | null {
+function decryptCookieValue(blob: Buffer, key: Buffer, hostKey: string | null): string | null {
   if (!blob || blob.length === 0) return '';
   const prefix = blob.subarray(0, 3).toString('ascii');
   if (prefix === 'v10' || prefix === 'v11') {
@@ -132,14 +138,24 @@ function decryptCookieValue(blob: Buffer, key: Buffer): string | null {
     const nonce = blob.subarray(3, 3 + 12);
     const tag = blob.subarray(blob.length - 16);
     const ciphertext = blob.subarray(3 + 12, blob.length - 16);
+    let plain: Buffer;
     try {
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, nonce);
       decipher.setAuthTag(tag);
-      const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-      return plain.toString('utf-8');
+      plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     } catch {
       return null;
     }
+    // Strip Chromium 116+ host-binding SHA256 prefix when present. We don't
+    // *require* it (compat with cookies written by older Chromium versions),
+    // but if it matches we drop those 32 bytes to recover the real value.
+    if (hostKey && plain.length >= 32) {
+      const hostHash = crypto.createHash('sha256').update(hostKey, 'utf-8').digest();
+      if (plain.subarray(0, 32).equals(hostHash)) {
+        plain = plain.subarray(32);
+      }
+    }
+    return plain.toString('utf-8');
   }
   if (prefix === 'v20') {
     // App-Bound Encryption (Chrome 127+). Requires COM elevation service to
@@ -147,13 +163,8 @@ function decryptCookieValue(blob: Buffer, key: Buffer): string | null {
     return null;
   }
   // Pre-v10 (no prefix) was a plain DPAPI blob over the value directly.
-  // Most modern Chromium builds don't produce these any more, but try.
-  try {
-    // We can't decrypt sync here — bail. Caller will see null.
-    return null;
-  } catch {
-    return null;
-  }
+  // Most modern Chromium builds don't produce these any more.
+  return null;
 }
 
 // ---------------- Cookies SQLite ----------------
@@ -322,8 +333,9 @@ export async function extractCookies(profileDir: string): Promise<ExtractResult>
         // Prefer encrypted_value, fall back to legacy plaintext `value`.
         let plainValue: string | null = null;
         const enc = row.encrypted_value;
+        const hostKey = String(row.host_key ?? '');
         if (enc && (enc as Uint8Array).length > 0) {
-          plainValue = decryptCookieValue(Buffer.from(enc as Uint8Array), key);
+          plainValue = decryptCookieValue(Buffer.from(enc as Uint8Array), key, hostKey);
         } else if (typeof row.value === 'string' && row.value.length > 0) {
           plainValue = row.value;
         } else {

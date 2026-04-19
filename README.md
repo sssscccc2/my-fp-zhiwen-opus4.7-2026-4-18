@@ -7,6 +7,38 @@
 
 ## 更新日志
 
+### v0.3.2 — Cookie 解密剥离 SHA256 host_key 前缀（2026-04-19）
+
+修复 v0.3.1 解密后的 cookie value 字段开头有 32 字节二进制乱码的问题。
+
+**根因**：从 Chromium 116（[CL 4609637](https://chromium-review.googlesource.com/c/chromium/src/+/4609637)）开始，cookies 加密前的明文实际格式是：
+
+```
+SHA256(host_key)  ||  real_value
+```
+
+也就是说 AES-GCM 解密成功后的明文前面**还有 32 字节 host_key 的 SHA256 哈希**，作为 cookie 的反篡改/host-binding 校验。v0.3.1 直接把整个解密结果当 value，导致每条 cookie value 开头都是一坨二进制（按 domain 分组完全相同，正好是该 domain 的 SHA256）。
+
+**修复**：在 `cookieExtractor.decryptCookieValue()` 末尾增加一个步骤：
+
+```ts
+if (hostKey && plain.length >= 32) {
+  const hostHash = crypto.createHash('sha256').update(hostKey, 'utf-8').digest();
+  if (plain.subarray(0, 32).equals(hostHash)) {
+    plain = plain.subarray(32);   // 剥离 host-binding prefix
+  }
+}
+```
+
+校验机制（如果前 32 字节不等于 SHA256(host_key) 就保留原文），保证旧版 Chromium（< 116）写入的 cookie 不受影响。
+
+**实测验证**（Chromium 145 / CloakBrowser）：本机 2 个窗口 113 条 cookie，10+ 个域（reddit / google / discord / yandex / whoer / criteo / hcaptcha / ...），**全部解密成 100% 干净明文，零乱码零失败**。
+
+**新增工具**
+
+- `scripts/test-cookie-extract.cjs` — 独立的端到端解密自检脚本，可直接 `node scripts/test-cookie-extract.cjs` 跑
+- `scripts/check-reddit-login.cjs` — Reddit 登录态专项探测脚本
+
 ### v0.3.1 — 云同步登录态修复（DPAPI 解密 + 注入回放）（2026-04-19）
 
 修复 v0.3.0 一个**关键问题**：上传到服务器的 Cookies SQLite 文件因为 Chromium 用 Windows DPAPI（绑定 Windows 用户登录凭证）加密了 `value` 字段，跨电脑下载后解不开 → 表现为"窗口同步过来了但都没登录"。
