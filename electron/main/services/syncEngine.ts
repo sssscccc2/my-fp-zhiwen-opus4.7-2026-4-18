@@ -35,6 +35,7 @@ import path from 'node:path';
 import { all, get, run } from '../db/client.js';
 import { listProfiles, listGroups } from './profileService.js';
 import { listProxies } from './proxyService.js';
+import { extractCookies } from './cookieExtractor.js';
 import { shouldSyncFile } from '@shared/profileWhitelist';
 import {
   SYNC_QUOTA_BYTES, SYNC_MAX_FILE_BYTES,
@@ -452,9 +453,32 @@ export async function uploadAll(
   const start = Date.now();
   const profiles = listProfiles();
 
-  onProgress?.({ phase: 'scan', current: 0, total: profiles.length, message: '扫描本地窗口...' });
+  // 1a. Extract cookies (DPAPI-decrypted plaintext JSON) into profile.cookies
+  // BEFORE we read profile data into the snapshot, so the snapshot carries
+  // them. On the target machine the launcher's existing addCookies() flow
+  // replays them — no need to ship the (un-portable) Cookies SQLite blob.
+  onProgress?.({ phase: 'scan', current: 0, total: profiles.length, message: '提取窗口 cookies...' });
+  for (let i = 0; i < profiles.length; i++) {
+    const p = profiles[i];
+    onProgress?.({ phase: 'scan', current: i, total: profiles.length, message: `提取 cookies: ${p.name}` });
+    try {
+      const ext = await extractCookies(p.userDataDir);
+      if (ext.cookies.length > 0) {
+        const json = JSON.stringify(ext.cookies);
+        run('UPDATE profiles SET cookies = @c WHERE id = @id', { c: json, id: p.id });
+        p.cookies = json;
+        console.log(`[sync] dumped ${ext.decrypted}/${ext.totalRows} cookies for "${p.name}" (skipped ${ext.skipped})`);
+      } else if (ext.reason && ext.reason !== 'NO_COOKIES_FILE') {
+        console.warn(`[sync] cookie dump skipped for "${p.name}": ${ext.reason}`);
+      }
+    } catch (err) {
+      console.warn(`[sync] cookie extract failed for "${p.name}":`, (err as Error).message);
+    }
+  }
 
-  // 1. Build all manifests up front so the snapshot can carry filesBytes.
+  onProgress?.({ phase: 'scan', current: 0, total: profiles.length, message: '扫描本地窗口文件...' });
+
+  // 1b. Build all manifests up front so the snapshot can carry filesBytes.
   const manifests: ProfileManifest[] = [];
   for (let i = 0; i < profiles.length; i++) {
     onProgress?.({ phase: 'scan', current: i, total: profiles.length, message: `扫描 ${profiles[i].name}` });

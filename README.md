@@ -7,6 +7,40 @@
 
 ## 更新日志
 
+### v0.3.1 — 云同步登录态修复（DPAPI 解密 + 注入回放）（2026-04-19）
+
+修复 v0.3.0 一个**关键问题**：上传到服务器的 Cookies SQLite 文件因为 Chromium 用 Windows DPAPI（绑定 Windows 用户登录凭证）加密了 `value` 字段，跨电脑下载后解不开 → 表现为"窗口同步过来了但都没登录"。
+
+**修复方式（方案 C）**
+
+- **上传前**：sync engine 对每个 profile 自动调用 `cookieExtractor`：
+  1. 读 `Local State.os_crypt.encrypted_key`
+  2. 通过 PowerShell 子进程调用 DPAPI `Unprotect` 拿到 32 字节 AES master key
+  3. 用 sql.js 读 `Default/Network/Cookies` 表
+  4. 对每条 cookie 的 `encrypted_value`（v10/v11 格式）做 AES-256-GCM 解密
+  5. 转成 v0.2 标准 cookie JSON，写入 `profile.cookies` 字段
+- **服务器**：snapshot.json 里多了明文 `cookies` 字段（基于"不加密"的整体策略）
+- **下载后**：`profile.cookies` 写回本地数据库
+- **启动浏览器时**：v0.2 已有的 `context.addCookies()` 自动把 cookies 注入到新机器的 profile → 立即登录态
+
+**特性 / 注意事项**
+
+| 场景 | 处理 |
+|---|---|
+| Chromium v10/v11（Chrome 80~126） | ✅ 完整解密 |
+| Chromium v20 App-Bound Encryption（Chrome 127+） | ⚠️ 跳过（CloakBrowser 默认禁用，正常情况遇不到） |
+| Cookies 文件被运行中浏览器锁定 | 复制到临时文件再读，避开 SQLITE_BUSY |
+| 上传日志 | 控制台打印 `dumped X/Y cookies for "name" (skipped Z)` |
+| Local State / Cookies SQLite 仍照常同步 | 同台机器恢复时直接 work，跨机器靠注入回放 |
+
+**新增文件**
+
+- `electron/main/services/cookieExtractor.ts` — DPAPI + AES-GCM + Cookies SQLite 读取
+
+**升级用户操作**
+
+旧 v0.3.0 已经上传到云端的 cookies 没有明文版本 → 下载到新电脑还是没登录态。**升级到 v0.3.1 后，在原电脑重新点一次"上传到云端"即可补全 cookies**，新电脑再下载就有登录态了。
+
 ### v0.3.0 — 云同步（多端账号同步）（2026-04-19）
 
 新增「**整账号云同步**」功能 — 在另一台电脑安装本程序、用同一账号登录，一键把所有窗口（含 cookies / 扩展 / 本地存储）拉过去，无需手动复制目录。
