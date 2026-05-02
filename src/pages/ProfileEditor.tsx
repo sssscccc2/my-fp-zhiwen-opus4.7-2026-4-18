@@ -7,6 +7,7 @@ import {
   ReloadOutlined, ThunderboltOutlined, SaveOutlined, ArrowLeftOutlined,
   ExperimentOutlined, GlobalOutlined, CheckCircleTwoTone, CloseCircleTwoTone,
   CloudUploadOutlined, DeleteOutlined, CopyOutlined,
+  DesktopOutlined, MobileOutlined, TabletOutlined,
 } from '@ant-design/icons';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -14,7 +15,7 @@ import { api } from '../api';
 import { fireDataChanged } from '../lib/dataBus';
 import type {
   Profile, ProfileGroup, ProxyConfig, FingerprintConfig, PresetTemplate,
-  ParsedProxy, ProxyTestResult, DnsMode, DnsConfig,
+  ParsedProxy, ProxyTestResult, DnsMode, DnsConfig, DeviceCategory,
 } from '@shared/types';
 import { DNS_PRESETS, recommendDns } from '@shared/dnsPresets';
 import {
@@ -36,6 +37,48 @@ interface FormValues extends Omit<Profile, 'fingerprint' | 'tags'> {
   tags: string;
   fingerprint: FingerprintConfig;
 }
+
+/** Resolve the form factor of a fingerprint, defaulting to 'desktop' for legacy profiles. */
+function deviceCategoryOf(fp: FingerprintConfig | undefined): DeviceCategory {
+  if (!fp) return 'desktop';
+  if (fp.device) return fp.device;
+  if (fp.os === 'ios' || fp.os === 'android') return 'mobile';
+  return 'desktop';
+}
+
+const OS_OPTIONS_BY_CATEGORY: Record<DeviceCategory, { label: string; value: FingerprintConfig['os'] }[]> = {
+  desktop: [
+    { label: 'Windows', value: 'windows' },
+    { label: 'macOS', value: 'mac' },
+    { label: 'Linux', value: 'linux' },
+  ],
+  tablet: [
+    { label: 'iPadOS (iOS)', value: 'ios' },
+    { label: 'Android', value: 'android' },
+  ],
+  mobile: [
+    { label: 'iOS', value: 'ios' },
+    { label: 'Android', value: 'android' },
+  ],
+};
+
+const PLATFORM_OPTIONS_BY_CATEGORY: Record<DeviceCategory, { label: string; value: string }[]> = {
+  desktop: [
+    { label: 'Win32', value: 'Win32' },
+    { label: 'MacIntel', value: 'MacIntel' },
+    { label: 'Linux x86_64', value: 'Linux x86_64' },
+    { label: 'Linux armv8l', value: 'Linux armv8l' },
+  ],
+  tablet: [
+    { label: 'iPad', value: 'iPad' },
+    { label: 'Linux armv8l (Android)', value: 'Linux armv8l' },
+  ],
+  mobile: [
+    { label: 'iPhone', value: 'iPhone' },
+    { label: 'iPod', value: 'iPod' },
+    { label: 'Linux armv8l (Android)', value: 'Linux armv8l' },
+  ],
+};
 
 export default function ProfileEditor() {
   const { id } = useParams<{ id: string }>();
@@ -173,9 +216,23 @@ export default function ProfileEditor() {
   };
 
   const randomize = async () => {
-    const fp = await api.preset.random();
+    const cur = form.getFieldValue('fingerprint') as FingerprintConfig | undefined;
+    const cat = deviceCategoryOf(cur);
+    const fp = await api.preset.random(cat);
     form.setFieldsValue({ fingerprint: fp } as unknown as FormValues);
-    message.success('已随机生成（按市场份额加权）');
+    message.success(`已按${cat === 'mobile' ? '手机' : cat === 'tablet' ? '平板' : '电脑'}市场份额随机生成`);
+  };
+
+  /**
+   * Switch device form factor. Triggers a fresh random fingerprint matching
+   * the new category so all interlocking fields (UA / platform / GPU / DPR /
+   * fonts / mobile.maxTouchPoints) stay coherent. The user can then tweak
+   * any individual field.
+   */
+  const switchDeviceCategory = async (cat: DeviceCategory) => {
+    const fp = await api.preset.random(cat);
+    form.setFieldsValue({ fingerprint: fp } as unknown as FormValues);
+    message.success(`已切换到${cat === 'mobile' ? '手机' : cat === 'tablet' ? '平板' : '电脑'}模式并应用对应指纹`);
   };
 
   const newSeed = () => {
@@ -427,10 +484,22 @@ export default function ProfileEditor() {
     setIssues(list);
   }, [fp]);
 
-  const presetOptions = useMemo(() => presets.map((p) => ({
-    label: `${p.name} (${p.marketShare}%)`,
-    value: p.id,
-  })), [presets]);
+  const currentCategory: DeviceCategory = deviceCategoryOf(fp);
+
+  const presetOptions = useMemo(() => {
+    // Filter presets to the currently-selected device category so users on the
+    // mobile tab only see iPhone/Android presets, etc. Each preset's category
+    // is taken from `fingerprint.device` (defaults to desktop when missing).
+    return presets
+      .filter((p) => {
+        const cat = (p.fingerprint.device ?? 'desktop') as DeviceCategory;
+        return cat === currentCategory;
+      })
+      .map((p) => ({
+        label: `${p.name} (${p.marketShare}%)`,
+        value: p.id,
+      }));
+  }, [presets, currentCategory]);
 
   // Live re-parse the cookie textarea (debounced via React batching). This
   // drives the preview card; saving re-parses independently.
@@ -477,14 +546,17 @@ export default function ProfileEditor() {
         <Space>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/profiles')}>返回</Button>
           <h2 style={{ margin: 0 }}>{isEdit ? '编辑配置' : '新建配置'}</h2>
+          <Tag color={currentCategory === 'mobile' ? 'magenta' : currentCategory === 'tablet' ? 'cyan' : 'blue'}>
+            {currentCategory === 'mobile' ? '📱 手机' : currentCategory === 'tablet' ? '📱 平板' : '💻 电脑'}
+          </Tag>
         </Space>
         <Space>
           <Tooltip title="按真实市场份额加权随机生成完整指纹">
             <Button icon={<ThunderboltOutlined />} onClick={randomize}>随机生成</Button>
           </Tooltip>
           <Select
-            placeholder="从预设加载"
-            style={{ width: 280 }}
+            placeholder={`从${currentCategory === 'mobile' ? '手机' : currentCategory === 'tablet' ? '平板' : '电脑'}预设加载`}
+            style={{ width: 320 }}
             options={presetOptions}
             onChange={applyPreset}
           />
@@ -516,6 +588,27 @@ export default function ProfileEditor() {
 
         <Form form={form} layout="vertical" autoComplete="off">
           <Card className="editor-card" title="基本信息">
+            {/* ---------- BitBrowser-style device picker ---------- */}
+            <Row gutter={16} style={{ marginBottom: 12 }}>
+              <Col span={24}>
+                <Form.Item label="设备类型" style={{ marginBottom: 4 }} required>
+                  <Segmented
+                    size="large"
+                    value={currentCategory}
+                    onChange={(v) => void switchDeviceCategory(v as DeviceCategory)}
+                    options={[
+                      { label: <Space><DesktopOutlined /> 电脑</Space>, value: 'desktop' },
+                      { label: <Space><TabletOutlined /> 平板</Space>, value: 'tablet' },
+                      { label: <Space><MobileOutlined /> 手机</Space>, value: 'mobile' },
+                    ]}
+                  />
+                </Form.Item>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  切换后将自动加载对应平台的指纹（UA / 屏幕 / GPU / 触摸点等），随后可手动微调。
+                </Typography.Text>
+              </Col>
+            </Row>
+
             <Row gutter={16}>
               <Col span={8}>
                 <Form.Item name="name" label="配置名称" rules={[{ required: true, message: '必填' }]}>
@@ -949,11 +1042,7 @@ export default function ProfileEditor() {
                     <Row gutter={16}>
                       <Col span={8}>
                         <Form.Item name={['fingerprint', 'os']} label="操作系统" rules={[{ required: true }]}>
-                          <Select options={[
-                            { label: 'Windows', value: 'windows' },
-                            { label: 'macOS', value: 'mac' },
-                            { label: 'Linux', value: 'linux' },
-                          ]} />
+                          <Select options={OS_OPTIONS_BY_CATEGORY[currentCategory]} />
                         </Form.Item>
                       </Col>
                       <Col span={8}>
@@ -975,12 +1064,7 @@ export default function ProfileEditor() {
                       </Col>
                       <Col span={6}>
                         <Form.Item name={['fingerprint', 'navigator', 'platform']} label="navigator.platform">
-                          <Select options={[
-                            { label: 'Win32', value: 'Win32' },
-                            { label: 'MacIntel', value: 'MacIntel' },
-                            { label: 'Linux x86_64', value: 'Linux x86_64' },
-                            { label: 'Linux armv8l', value: 'Linux armv8l' },
-                          ]} />
+                          <Select options={PLATFORM_OPTIONS_BY_CATEGORY[currentCategory]} />
                         </Form.Item>
                       </Col>
                       <Col span={6}>
@@ -1134,6 +1218,12 @@ export default function ProfileEditor() {
                         { label: 'macOS 13 默认', value: 'macos-13' },
                         { label: 'macOS 14 默认', value: 'macos-14' },
                         { label: 'Linux 通用 (~80 字体)', value: 'linux' },
+                        { label: 'iOS 17 默认 (~180 字体)', value: 'ios-17' },
+                        { label: 'iOS 18 默认 (~200 字体)', value: 'ios-18' },
+                        { label: 'Android 13 默认 (~70 字体)', value: 'android-13' },
+                        { label: 'Android 14 默认 (~80 字体)', value: 'android-14' },
+                        { label: 'Android 15 默认 (~85 字体)', value: 'android-15' },
+                        { label: 'Android 16 默认 (~90 字体)', value: 'android-16' },
                       ]} />
                     </Form.Item>
                   ),
@@ -1197,6 +1287,107 @@ export default function ProfileEditor() {
                     </Row>
                   ),
                 },
+                ...(currentCategory !== 'desktop' ? [{
+                  key: 'mobile',
+                  label: <Space><MobileOutlined /> 移动端</Space>,
+                  forceRender: true,
+                  children: (
+                    <Row gutter={16}>
+                      <Col span={24} style={{ marginBottom: 12 }}>
+                        <Alert
+                          type="success"
+                          showIcon
+                          message="移动端反检测已启用（CDP UA-CH + InitScript）"
+                          description={
+                            <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                              <div>启动后会自动注入：</div>
+                              <ul style={{ margin: '4px 0 4px 20px', padding: 0 }}>
+                                <li><strong>CDP setUserAgentOverride</strong> + 完整 userAgentMetadata（<code>sec-ch-ua-mobile=?1</code>、<code>platform="iOS/Android"</code>、<code>model</code>）</li>
+                                <li><strong>navigator.userAgentData</strong>（Android）/ <strong>pdfViewerEnabled=false</strong>（iOS）</li>
+                                <li><strong>navigator.connection</strong>（NetworkInformation API）— Android 必备项</li>
+                                <li><strong>清除 Playwright 残留</strong>：<code>__playwright</code>、<code>__pw_*</code>、<code>cdc_*</code></li>
+                                <li><strong>window.chrome</strong> 完整结构：<code>loadTimes / csi / runtime / app</code></li>
+                                <li>多点触控、TouchEvent 类、<code>ontouchstart</code>、媒体查询 <code>pointer:coarse</code></li>
+                              </ul>
+                              <div style={{ color: '#888' }}>对应 HackingLZ/fingerprint_js 检测项 b1/b3/b6/b7/b12/b13/b29 均通过。</div>
+                            </div>
+                          }
+                        />
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name={['fingerprint', 'mobile', 'maxTouchPoints']} label="navigator.maxTouchPoints">
+                          <Select options={[1, 2, 5, 10].map((v) => ({ label: String(v), value: v }))} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name={['fingerprint', 'mobile', 'brand']} label="移动端浏览器品牌">
+                          <Select options={[
+                            { label: 'Safari (iOS)', value: 'Safari' },
+                            { label: 'Chrome', value: 'Chrome' },
+                            { label: 'Edge', value: 'Edge' },
+                            { label: 'Samsung Internet', value: 'Samsung Internet' },
+                          ]} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name={['fingerprint', 'mobile', 'deviceModel']} label="设备型号（显示名）">
+                          <Input placeholder="例如：iPhone 17 Pro / Pixel 10 Pro" />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item
+                          name={['fingerprint', 'mobile', 'modelCode']}
+                          label="设备代号 (userAgentData.model)"
+                          extra="高熵线索 — 真机示例：iPhone18,1 / SM-S938B / Pixel 10 Pro"
+                        >
+                          <Input placeholder="iPhone18,1 / SM-S938B / Pixel 10 Pro" />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item
+                          name={['fingerprint', 'mobile', 'osVersion']}
+                          label="操作系统版本"
+                          extra="iOS 示例: 18.7.0；Android 示例: 16.0.0"
+                        >
+                          <Input placeholder="18.7.0 / 16.0.0" />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item
+                          name={['fingerprint', 'mobile', 'browserVersion']}
+                          label="浏览器版本"
+                          extra="iOS Safari: 26.5；Chrome: 146.0.7680.177"
+                        >
+                          <Input placeholder="26.5 / 146.0.7680.177" />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name={['fingerprint', 'mobile', 'architecture']} label="CPU 架构">
+                          <Select options={[
+                            { label: 'arm64 (主流 64 位)', value: 'arm64' },
+                            { label: 'arm (32 位老机)', value: 'arm' },
+                            { label: '空字符串（隐藏）', value: '' },
+                          ]} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={16}>
+                        <Form.Item
+                          name={['fingerprint', 'mobile', 'formFactors']}
+                          label="Sec-CH-UA-Form-Factors"
+                          extra="2025+ 真机：手机=['Mobile']、平板=['Tablet']、折叠屏=['Mobile','Foldable']"
+                          getValueFromEvent={(v) => Array.isArray(v) ? v : [v]}
+                        >
+                          <Select mode="tags" options={[
+                            { label: 'Mobile', value: 'Mobile' },
+                            { label: 'Tablet', value: 'Tablet' },
+                            { label: 'Foldable', value: 'Foldable' },
+                            { label: 'Desktop', value: 'Desktop' },
+                          ]} />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  ),
+                }] : []),
               ]}
             />
           </Card>

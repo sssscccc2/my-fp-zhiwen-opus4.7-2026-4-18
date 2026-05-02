@@ -16,6 +16,37 @@ import { screen } from 'electron';
  *   - keep aspect ratio of the spoofed dimensions where possible
  *   - never go below 1024x720 (would break layout on most sites)
  */
+/**
+ * For mobile / tablet windows, the SPOOF dimensions (e.g. 393x852 for iPhone)
+ * are too small to interact with on a desktop monitor. Scale the window up
+ * for usability while keeping the spoofed `window.screen.*` and `viewport`
+ * unchanged so sites still see a real phone. This is exactly how
+ * AdsPower / BitBrowser handle mobile profile windows.
+ */
+function computeRealMobileWindowSize(spoofedW: number, spoofedH: number): { w: number; h: number } {
+  // Aspect-preserving scale: target a real window of ~420x900 on phones,
+  // ~768x1024 on tablets. The natural phone aspect (~9:19.5) keeps it tall.
+  const isTablet = spoofedW >= 700; // iPad-class
+  const targetW = isTablet ? 820 : 460;
+  const targetH = isTablet ? 1100 : 980;
+
+  let workW = targetW;
+  let workH = targetH;
+  try {
+    const primary = screen.getPrimaryDisplay();
+    workW = Math.min(workW, Math.floor(primary.workAreaSize.width * 0.95));
+    workH = Math.min(workH, Math.floor(primary.workAreaSize.height * 0.95));
+  } catch {
+    // app may not be ready — fall back to fixed targets
+  }
+  // Preserve aspect ratio of the spoofed device while fitting in workW/workH.
+  const ratio = Math.min(workW / spoofedW, workH / spoofedH);
+  return {
+    w: Math.max(360, Math.floor(spoofedW * ratio)),
+    h: Math.max(640, Math.floor(spoofedH * ratio)),
+  };
+}
+
 function computeRealWindowSize(spoofedW: number, spoofedH: number): { w: number; h: number } {
   let workW = spoofedW;
   let workH = spoofedH;
@@ -74,7 +105,11 @@ export function validateConsistency(fp: FingerprintConfig): ConsistencyIssue[] {
 
   const uaIsWindows = ua.includes('windows');
   const uaIsMac = ua.includes('mac os x') || ua.includes('macintosh');
-  const uaIsLinux = ua.includes('linux') && !ua.includes('android');
+  // Linux desktop UA contains "linux" but not "android" — Android UA also has
+  // "linux" because it IS a linux kernel device.
+  const uaIsLinux = ua.includes('linux') && !ua.includes('android') && !ua.includes('iphone') && !ua.includes('ipad');
+  const uaIsIOS = ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod');
+  const uaIsAndroid = ua.includes('android');
 
   if (fp.os === 'windows' && !uaIsWindows) {
     issues.push({ level: 'error', field: 'navigator.userAgent', message: 'OS=windows 但 UA 中未包含 Windows 标识' });
@@ -83,10 +118,16 @@ export function validateConsistency(fp: FingerprintConfig): ConsistencyIssue[] {
     issues.push({ level: 'error', field: 'navigator.userAgent', message: 'OS=mac 但 UA 中未包含 Mac 标识' });
   }
   if (fp.os === 'linux' && !uaIsLinux) {
-    issues.push({ level: 'error', field: 'navigator.userAgent', message: 'OS=linux 但 UA 中未包含 Linux 标识' });
+    issues.push({ level: 'error', field: 'navigator.userAgent', message: 'OS=linux 但 UA 中未包含 Linux 桌面标识' });
+  }
+  if (fp.os === 'ios' && !uaIsIOS) {
+    issues.push({ level: 'error', field: 'navigator.userAgent', message: 'OS=ios 但 UA 中缺少 iPhone/iPad/iPod 标识' });
+  }
+  if (fp.os === 'android' && !uaIsAndroid) {
+    issues.push({ level: 'error', field: 'navigator.userAgent', message: 'OS=android 但 UA 中未包含 Android 标识' });
   }
 
-  const platform = fp.navigator.platform;
+  const platform = fp.navigator.platform ?? '';
   if (fp.os === 'windows' && platform !== 'Win32') {
     issues.push({ level: 'error', field: 'navigator.platform', message: `Windows 系统 platform 应为 "Win32"，当前 "${platform}"` });
   }
@@ -95,6 +136,12 @@ export function validateConsistency(fp: FingerprintConfig): ConsistencyIssue[] {
   }
   if (fp.os === 'linux' && !platform.startsWith('Linux')) {
     issues.push({ level: 'error', field: 'navigator.platform', message: `Linux 系统 platform 应以 "Linux" 开头，当前 "${platform}"` });
+  }
+  if (fp.os === 'ios' && !(platform === 'iPhone' || platform === 'iPad' || platform === 'iPod')) {
+    issues.push({ level: 'error', field: 'navigator.platform', message: `iOS 系统 platform 应为 iPhone / iPad / iPod，当前 "${platform}"` });
+  }
+  if (fp.os === 'android' && !platform.startsWith('Linux')) {
+    issues.push({ level: 'warning', field: 'navigator.platform', message: `Android 系统 platform 通常为 "Linux armv8l"，当前 "${platform}"` });
   }
 
   const rendererIsApple = renderer.includes('apple') || renderer.includes('metal');
@@ -117,12 +164,36 @@ export function validateConsistency(fp: FingerprintConfig): ConsistencyIssue[] {
   if (fp.os === 'windows' && !rendererIsWindowsGpu) {
     issues.push({ level: 'warning', field: 'webgl.renderer', message: 'Windows 渲染器通常应包含 ANGLE/Direct3D' });
   }
+  if (fp.os === 'ios' && !rendererIsApple) {
+    issues.push({ level: 'warning', field: 'webgl.renderer', message: 'iOS 设备 GPU 通常是 Apple GPU' });
+  }
+  if (fp.os === 'android' && !(renderer.includes('adreno') || renderer.includes('mali') || renderer.includes('powervr') || renderer.includes('xclipse'))) {
+    issues.push({ level: 'warning', field: 'webgl.renderer', message: 'Android GPU 通常为 Adreno / Mali / Xclipse / PowerVR' });
+  }
 
-  if (![1, 2, 3].includes(fp.screen.pixelRatio)) {
-    issues.push({ level: 'warning', field: 'screen.pixelRatio', message: 'devicePixelRatio 通常为 1/2/3' });
+  if (![1, 1.25, 1.5, 2, 2.625, 3].includes(fp.screen.pixelRatio)) {
+    issues.push({ level: 'warning', field: 'screen.pixelRatio', message: 'devicePixelRatio 通常为 1/1.5/2/2.625/3' });
   }
   if (fp.os === 'mac' && fp.screen.pixelRatio === 1) {
     issues.push({ level: 'warning', field: 'screen.pixelRatio', message: 'Mac 视网膜屏 devicePixelRatio 通常为 2' });
+  }
+  if (fp.os === 'ios' && fp.screen.pixelRatio < 2) {
+    issues.push({ level: 'warning', field: 'screen.pixelRatio', message: 'iOS Retina 设备 DPR 通常为 2 或 3' });
+  }
+  if (fp.os === 'android' && fp.screen.pixelRatio < 1.5) {
+    issues.push({ level: 'warning', field: 'screen.pixelRatio', message: 'Android 设备 DPR 通常 ≥ 2' });
+  }
+
+  // Mobile screens are tall and narrow; flag if user accidentally left desktop dimensions on a mobile profile.
+  const isMobileLike = fp.device === 'mobile' || fp.device === 'tablet' || fp.os === 'ios' || fp.os === 'android';
+  if (isMobileLike && fp.screen.width > 1280) {
+    issues.push({ level: 'warning', field: 'screen.width', message: '移动端 / 平板设备宽度通常 ≤ 1280' });
+  }
+  if (isMobileLike && fp.screen.width > fp.screen.height) {
+    issues.push({ level: 'warning', field: 'screen', message: '移动设备屏幕通常竖向（高 > 宽）' });
+  }
+  if (isMobileLike && fp.mobile && fp.mobile.maxTouchPoints < 1) {
+    issues.push({ level: 'error', field: 'mobile.maxTouchPoints', message: '移动端必须至少 1 个触摸点（建议 5）' });
   }
 
   if (![1, 2, 4, 6, 8, 12, 16, 20, 24, 32].includes(fp.navigator.hardwareConcurrency)) {
@@ -176,13 +247,23 @@ export function buildLaunchOptions(
   }
 
   // CloakBrowser maps: 'mac' -> 'macos'. Keep our domain language consistent.
-  const cloakPlatform = fp.os === 'mac' ? 'macos' : fp.os;
+  // For iOS we fall back to 'macos' at the C++ patch layer (CloakBrowser only
+  // supports desktop platforms there) — the mobile *identity* is achieved via
+  // UA + Playwright mobile emulation (isMobile/hasTouch/viewport/DPR).
+  const cloakPlatform =
+    fp.os === 'mac' || fp.os === 'ios' ? 'macos'
+    : fp.os === 'android' ? 'linux'
+    : fp.os;
 
-  // Real window size = clamped to user's actual monitor; spoofed size stays
-  // exactly what fp.screen reports (sites read window.screen.* / inner*).
-  // This is what AdsPower / BitBrowser also do — title bar fits on a 1080p
-  // monitor while JS still sees 1920x1080.
-  const realWin = computeRealWindowSize(fp.screen.width, fp.screen.height);
+  // For mobile / tablet, the spoofed dimensions (e.g. 393x852) are TINY —
+  // we don't want the actual native window to also be 393px wide because
+  // the user can't comfortably interact at that size. Use a sensible scale
+  // factor instead so the chrome window resembles a desktop preview of a
+  // phone (similar to BitBrowser's mobile preview).
+  const isMobile = fp.device === 'mobile' || fp.device === 'tablet' || fp.os === 'ios' || fp.os === 'android';
+  const realWin = isMobile
+    ? computeRealMobileWindowSize(fp.screen.width, fp.screen.height)
+    : computeRealWindowSize(fp.screen.width, fp.screen.height);
 
   // CloakBrowser auto-derives hardware/screen/GPU from seed when not specified;
   // we only override what the user explicitly customized in the preset so that
@@ -266,11 +347,13 @@ export function buildLaunchOptions(
   const options: Record<string, unknown> = {
     headless: opts.headless ?? false,
     userAgent: fp.navigator.userAgent,
-    // CRITICAL: pass viewport: null so Playwright doesn't force the inner
-    // viewport to a specific value (which would overflow off-screen for
-    // 1920x1080 spoofs on smaller monitors). The browser uses --window-size
-    // for the actual window and --fingerprint-screen-* for the spoof.
-    viewport: null,
+    // For desktop windows we pass viewport: null so Playwright doesn't force
+    // the inner viewport (which would overflow off-screen on smaller
+    // monitors). For MOBILE windows we DO want a fixed mobile viewport — that
+    // is the whole point: sites detect mobile via viewport + isMobile + touch.
+    viewport: isMobile
+      ? { width: fp.screen.width, height: fp.screen.height }
+      : null,
     locale: fp.locale,
     timezone: fp.timezone,
     humanize: opts.humanize ?? true,
@@ -284,6 +367,25 @@ export function buildLaunchOptions(
   if (proxyStr) {
     options.proxy = proxyStr;
     options.geoip = true;
+  }
+
+  // Mobile / tablet emulation: feed Playwright's `isMobile` + `hasTouch` +
+  // `deviceScaleFactor` via contextOptions. This causes Chromium to:
+  //   - report `navigator.maxTouchPoints` > 0
+  //   - subscribe to TouchEvent / PointerEvent (coarse pointer)
+  //   - use mobile viewport metrics (`window.matchMedia('(max-width: …)')`)
+  //   - render at fp.screen.pixelRatio (DPR) so sites pick @3x assets etc.
+  if (isMobile) {
+    const touchPoints = fp.mobile?.maxTouchPoints ?? 5;
+    options.contextOptions = {
+      ...(options.contextOptions as Record<string, unknown> | undefined),
+      isMobile: true,
+      hasTouch: touchPoints > 0,
+      deviceScaleFactor: fp.screen.pixelRatio,
+      viewport: { width: fp.screen.width, height: fp.screen.height },
+      // screen reported via Emulation.setDeviceMetricsOverride matches viewport
+      screen: { width: fp.screen.width, height: fp.screen.height },
+    };
   }
 
   if (fp.geo.enabled) {

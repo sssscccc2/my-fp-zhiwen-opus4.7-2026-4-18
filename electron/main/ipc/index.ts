@@ -8,7 +8,11 @@ import {
   listProxies, createProxy, updateProxy, deleteProxy, testProxy, getProxy, recordTestResult,
   parseProxyString, testProxyAdhoc,
 } from '../services/proxyService.js';
-import { PRESETS, generateRandomFingerprint, getPresetById, presetToFingerprint } from '../services/presets.js';
+import {
+  PRESETS, generateRandomFingerprint, generateRandomFingerprintForCategory,
+  getPresetById, presetToFingerprint,
+} from '../services/presets.js';
+import type { DeviceCategory } from '@shared/types';
 import {
   launchProfile, closeProfile, listRunning, runFingerprintTest, isCloakAvailable,
   ensureCloakBinary, getCloakBinaryStatus, getCloakCacheDir, importCloakBinaryZip,
@@ -85,9 +89,12 @@ export function registerIpcHandlers(): void {
   }));
 
   ipcMain.handle(IPC.Preset.List, wrap(() => PRESETS));
-  ipcMain.handle(IPC.Preset.Random, wrap((presetId?: string) => {
-    if (presetId) {
-      const p = getPresetById(presetId);
+  ipcMain.handle(IPC.Preset.Random, wrap((presetIdOrCategory?: string) => {
+    if (presetIdOrCategory === 'desktop' || presetIdOrCategory === 'mobile' || presetIdOrCategory === 'tablet') {
+      return generateRandomFingerprintForCategory(presetIdOrCategory as DeviceCategory);
+    }
+    if (presetIdOrCategory) {
+      const p = getPresetById(presetIdOrCategory);
       if (!p) throw new Error('Preset not found');
       return presetToFingerprint(p);
     }

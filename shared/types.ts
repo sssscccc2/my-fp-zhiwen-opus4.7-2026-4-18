@@ -1,4 +1,20 @@
-export type OSPlatform = 'windows' | 'mac' | 'linux';
+export type OSPlatform = 'windows' | 'mac' | 'linux' | 'ios' | 'android';
+
+/**
+ * Device category drives a different launch flow:
+ *   - 'desktop' / 'tablet' / 'mobile'
+ *
+ * Mobile/tablet windows are launched with Playwright's mobile emulation
+ * (`isMobile`, `hasTouch`, `deviceScaleFactor`, mobile `viewport`) on top of
+ * an iOS Safari / Android Chrome User-Agent. This mirrors what BitBrowser
+ * (比特浏览器) and AdsPower expose as the "mobile profile" mode — the site
+ * sees `navigator.userAgent`, `Touch` events, `window.matchMedia('(pointer:coarse)')`
+ * and viewport dimensions all consistent with a real phone / tablet.
+ *
+ * Desktop is the default (and only mode prior to v0.4.0). Existing profiles
+ * that lack the field are treated as desktop.
+ */
+export type DeviceCategory = 'desktop' | 'tablet' | 'mobile';
 
 export type CanvasMode = 'noise' | 'real' | 'block';
 export type AudioMode = 'noise' | 'real' | 'block';
@@ -39,13 +55,78 @@ export interface GeoConfig {
 }
 
 export interface FontsConfig {
-  preset: 'windows-10' | 'windows-11' | 'macos-13' | 'macos-14' | 'linux' | 'custom';
+  preset:
+    | 'windows-10'
+    | 'windows-11'
+    | 'macos-13'
+    | 'macos-14'
+    | 'linux'
+    | 'ios-17'
+    | 'ios-18'
+    | 'android-13'
+    | 'android-14'
+    | 'android-15'
+    | 'android-16'
+    | 'custom';
   customList?: string[];
+}
+
+/**
+ * Mobile-specific knobs that only apply when `device` is 'mobile' or 'tablet'.
+ * Driven by Playwright's mobile emulation (CDP `Emulation.setDeviceMetricsOverride`
+ * + touch event subscription) **plus** CDP `Emulation.setUserAgentOverride`
+ * with full `userAgentMetadata` so `navigator.userAgentData.mobile` /
+ * `platform` / `model` and `Sec-CH-UA-*` headers all reflect a real phone.
+ * Desktop windows ignore these completely.
+ */
+export interface MobileConfig {
+  /** maxTouchPoints reported by `navigator.maxTouchPoints` (typical 5 for iOS, 5-10 Android). */
+  maxTouchPoints: number;
+  /** Browser brand on mobile: Safari for iOS, Chrome for Android, etc. */
+  brand: 'Safari' | 'Chrome' | 'Edge' | 'Samsung Internet';
+  /** Friendly model name for display (e.g. 'iPhone 17 Pro', 'Pixel 10 Pro'). */
+  deviceModel?: string;
+  /**
+   * Internal device codename that real Chrome on the device reports in
+   * `navigator.userAgentData.model` (high-entropy hint). Examples:
+   *   - iPhone:  'iPhone18,1' (iPhone 17 Pro), 'iPhone16,1' (iPhone 15 Pro)
+   *   - Android: 'SM-S938U' (Galaxy S25 Ultra), 'Pixel 10 Pro'
+   * Detection: FingerprintJS Pro / Cloudflare Bot Management read this hint.
+   */
+  modelCode?: string;
+  /**
+   * OS version string that real devices report in
+   * `navigator.userAgentData.platformVersion`. Examples:
+   *   - iOS: '18.7.0' (iPhone 17 Pro stock), '17.0.1'
+   *   - Android: '16.0.0', '15.0.0'
+   * Embedded in UA string and Sec-CH-UA-Platform-Version header.
+   */
+  osVersion?: string;
+  /**
+   * Browser version (the Chrome / Safari engine version embedded in UA).
+   * iOS Safari: '26.5' (Safari 26 = iOS 18 generation), '17.0'.
+   * Android Chrome: '146.0.7680.177', '145.0.0.0'.
+   * For Chrome / Edge, this also drives Sec-CH-UA brand list.
+   */
+  browserVersion?: string;
+  /**
+   * CPU architecture in `navigator.userAgentData.architecture` /
+   * `Sec-CH-UA-Arch`. iOS / modern Android phones are always 'arm64' (or '').
+   */
+  architecture?: 'arm' | 'arm64' | '';
+  /**
+   * Form-factor list reported in `Sec-CH-UA-Form-Factors` header. Real Chrome
+   * on phones ships ['Mobile'] in 2025+; foldables ship ['Mobile', 'Foldable'].
+   * Tablets ship ['Tablet'] (no 'Mobile').
+   */
+  formFactors?: string[];
 }
 
 export interface FingerprintConfig {
   seed: number;
   os: OSPlatform;
+  /** Form factor — drives mobile emulation at launch. Defaults to 'desktop'. */
+  device?: DeviceCategory;
   brand: 'Chrome' | 'Edge';
   navigator: NavigatorConfig;
   screen: ScreenConfig;
@@ -58,6 +139,8 @@ export interface FingerprintConfig {
   webrtc: { mode: WebRTCMode };
   fonts: FontsConfig;
   storageQuotaMB: number;
+  /** Only used when `device !== 'desktop'`. */
+  mobile?: MobileConfig;
 }
 
 /**

@@ -7,6 +7,60 @@
 
 ## 更新日志
 
+### v0.4.0 — 📱 移动端窗口模式（iOS / Android 反检测）（2026-05-03）
+
+新增「**手机 / 平板 浏览器窗口创建模式**」（类比 BitBrowser），支持创建 iPhone / Android 真机指纹的窗口，并在 CDP + InitScript 双层做全方位反检测。
+
+**主要变更**
+
+- 创建 / 编辑窗口顶部新增 **`💻 电脑 / 📱 平板 / 📱 手机`** 大号 Segmented 切换器，切换后自动随机生成对应类型的指纹
+- 新增 2025-2026 真机预设：iPhone 17 Pro Max / iPhone 17 Pro / iPhone 16 / iPad Pro M5 / iPad Air M4 / Pixel 10 Pro / Pixel 9 / Galaxy S25 Ultra / Galaxy Tab S10 等
+- `OSPlatform` 扩展支持 `'ios'` 与 `'android'`；`DeviceCategory` 新类型 `'desktop' | 'tablet' | 'mobile'`
+- 新增 `MobileConfig` 配置项：`maxTouchPoints` / 品牌 / 设备型号 / 模型代号 / OS 版本 / 浏览器版本 / 架构 (`arm` / `arm64`) / `formFactors` (`["Mobile"]` / `["Tablet"]`)
+- ProfileEditor 新增「**📱 移动端**」Tab（仅在手机 / 平板分类时显示），可逐项调整上述参数
+- ProfileList 新增「设备」列与设备类型筛选；卡片视图显示设备型号
+
+**反检测核心：`electron/main/services/mobileStealth.ts`（新文件）**
+
+| 检测点 | 处理方式 |
+|---|---|
+| `User-Agent` HTTP 头 | CDP `Emulation.setUserAgentOverride` 全局生效 |
+| `navigator.userAgentData` / `Sec-CH-UA-*` Client Hints | CDP `userAgentMetadata` 注入完整 brands / fullVersionList / platform / platformVersion / model / mobile / bitness / formFactors |
+| `navigator.platform` / `vendor` / `language(s)` | InitScript 在主帧 / iframe / Worker 全部 patch |
+| `navigator.maxTouchPoints` | 同步到 `mobile.maxTouchPoints`（iOS=5 / Android=10） |
+| `navigator.hardwareConcurrency` / `deviceMemory` | 与设备型号匹配（iPhone 6, Android 8/12 etc.） |
+| `navigator.connection` | 强制 `'4g' / 'wifi' / 'cellular'` 形态 |
+| `screen.*` / `window.devicePixelRatio` | 与真机 spec 严格一致；窗口实际像素 1.5x 放大方便操作但 spoof 值不变 |
+| `window.chrome` | iOS 删除 / Android 保留并重写 `loadTimes` `csi` |
+| `navigator.webdriver` / `__playwright` / `cdc_*` | 全部清除 |
+| `pdfViewerEnabled` / `plugins` / `getBattery` | iOS 强制空 / 不可用 |
+| 触屏事件 | CDP `Emulation.setTouchEmulationEnabled` |
+| 时区 | CDP `Emulation.setTimezoneOverride` 与 IP 联动 |
+
+**一致性校验扩展**（`fingerprintBuilder.validateConsistency`）
+
+- iOS：UA 必须含 `iPhone` / `iPad`、platform 为 `iPhone` / `iPad` / `MacIntel`、GPU 为 Apple GPU、DPR ∈ {2,3}、`maxTouchPoints>=1`、屏幕 `height>width`
+- Android：UA 必须含 `Android`、platform 为 `Linux armv*`、GPU 含 `Mali/Adreno/PowerVR`、DPR ∈ {2,2.5,2.75,3,3.5}、`maxTouchPoints>=1`
+
+**兼容性**
+
+- 数据库 schema 不变；旧 profile 通过 `normalizeFingerprint` 自动补全 `device='desktop'`，行为零变化
+- 覆盖安装不会清空 `%AppData%\TianHu6Jin\`（NSIS `deleteAppDataOnUninstall: false`），所有窗口、登录态、cookies、CloakBrowser 内核均保留
+
+**新增 / 修改文件**
+
+| 路径 | 说明 |
+|---|---|
+| `electron/main/services/mobileStealth.ts` | **新增**：CDP UA-CH override + InitScript 全方位反检测 |
+| `electron/main/services/presets.ts` | 重写移动端预设为 2025-2026 真机；新增 `listPresetsByCategory` / `pickRandomPresetForCategory` |
+| `electron/main/services/fingerprintBuilder.ts` | 加入 iOS / Android 一致性校验 + 移动窗口尺寸放大策略 |
+| `electron/main/services/browserLauncher.ts` | 启动后调用 `applyMobileStealthToContext` |
+| `electron/main/services/profileService.ts` | 旧 profile 自动补 device / mobile 字段（自愈） |
+| `shared/types.ts` | `OSPlatform` / `DeviceCategory` / `MobileConfig` |
+| `src/pages/ProfileEditor.tsx` | 顶部 Segmented + 移动端 Tab + 动态 OS / Platform 选项 |
+| `src/pages/ProfileList.tsx` | 设备列 + 设备类型筛选 + 卡片视图设备 Tag |
+| `release-notes-v0.4.0.md` | 详细发布说明 |
+
 ### v0.3.2 — Cookie 解密剥离 SHA256 host_key 前缀（2026-04-19）
 
 修复 v0.3.1 解密后的 cookie value 字段开头有 32 字节二进制乱码的问题。
@@ -310,6 +364,8 @@ npm run package
 - [x] Cookies 注入（v0.2.0，AdsPower / iSO / EditThisCookie / Playwright 多格式）
 - [x] 远程认证 + 管理后台
 - [x] 标准 NSIS 安装包（内置 Chromium）
+- [x] **整账号云同步**（v0.3.0 / v0.3.1，DPAPI 解密 + cookies 注入回放）
+- [x] **移动端 UA 模拟（iOS / Android）**（v0.4.0，CDP + InitScript 双层反检测，2025-2026 真机预设）
 
 计划中：
 
@@ -319,7 +375,6 @@ npm run package
 - [ ] 多窗口同步器（鼠标键盘镜像）
 - [ ] 团队 / 多用户权限（已有认证基础设施）
 - [ ] WebDAV / S3 云端同步
-- [ ] 移动端 UA 模拟（iOS / Android）
 
 ## 免责声明
 

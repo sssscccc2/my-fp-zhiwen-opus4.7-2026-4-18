@@ -61,13 +61,32 @@ function normalizeFingerprint(fp: Partial<FingerprintConfig>): FingerprintConfig
     if (ua.includes('windows') || ua.includes('mac os x')) { fp.navigator = undefined; }
   }
 
+  // Mobile self-heal: if OS is iOS/Android but `device` / `mobile` fields are
+  // absent (legacy profile or partial edit), derive sane defaults so the
+  // launcher can apply Playwright mobile emulation correctly.
+  if ((os === 'ios' || os === 'android')) {
+    const f = fp as FingerprintConfig;
+    if (!f.device || f.device === 'desktop') {
+      // Default to phone form factor; iPad UA will set tablet via UA detection
+      // in a future preset (we keep the heuristic conservative here).
+      f.device = ua.includes('ipad') ? 'tablet' : 'mobile';
+    }
+    if (!f.mobile) {
+      f.mobile = {
+        maxTouchPoints: 5,
+        brand: os === 'ios' ? 'Safari' : 'Chrome',
+      };
+    }
+  }
+
   const missing = required.filter((k) => fp[k] === undefined || fp[k] === null);
   if (missing.length === 0) return fp as FingerprintConfig;
 
   // CRITICAL: pick a fallback whose OS matches, so we don't end up filling a
   // Windows profile with Apple Metal WebGL etc. (which would later trip
-  // the consistency validator).
-  const fallback = (os === 'windows' || os === 'mac' || os === 'linux')
+  // the consistency validator). iOS / Android are also supported now so
+  // mobile profiles self-heal with a matching mobile preset.
+  const fallback = (os === 'windows' || os === 'mac' || os === 'linux' || os === 'ios' || os === 'android')
     ? generateRandomFingerprintForOS(os)
     : generateRandomFingerprint();
   // Preserve user's seed/os/brand so the visible identity stays the same.
@@ -89,6 +108,8 @@ function normalizeFingerprint(fp: Partial<FingerprintConfig>): FingerprintConfig
     timezone: fp.timezone ?? fallback.timezone,
     locale: fp.locale ?? fallback.locale,
     storageQuotaMB: fp.storageQuotaMB ?? fallback.storageQuotaMB,
+    device: (fp as FingerprintConfig).device ?? fallback.device,
+    mobile: fp.mobile ?? fallback.mobile,
   };
   console.warn(`[profileService] auto-healed fingerprint, filled missing fields: ${missing.join(', ')}`);
   return merged;

@@ -5,13 +5,39 @@ import {
 import {
   PlusOutlined, PlayCircleOutlined, StopOutlined, MoreOutlined, ReloadOutlined,
   AppstoreOutlined, UnorderedListOutlined, FolderOpenOutlined,
+  DesktopOutlined, MobileOutlined, TabletOutlined,
 } from '@ant-design/icons';
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { fireDataChanged, useDataReload } from '../lib/dataBus';
 import SyncWidget from '../components/SyncWidget';
-import type { Profile, ProfileGroup, ProxyConfig, LaunchedBrowserInfo } from '@shared/types';
+import type { Profile, ProfileGroup, ProxyConfig, LaunchedBrowserInfo, DeviceCategory } from '@shared/types';
+
+/**
+ * Resolve a profile's form factor (desktop / tablet / mobile). Mirrors the
+ * editor logic — desktop is the default for legacy profiles missing the
+ * `device` field, and mobile-class OSes (ios / android) imply mobile.
+ */
+function deviceCategoryOf(p: Profile): DeviceCategory {
+  const fp = p.fingerprint;
+  if (fp.device) return fp.device;
+  if (fp.os === 'ios' || fp.os === 'android') return 'mobile';
+  return 'desktop';
+}
+
+function renderDeviceTag(p: Profile) {
+  const cat = deviceCategoryOf(p);
+  const icon = cat === 'mobile' ? <MobileOutlined /> : cat === 'tablet' ? <TabletOutlined /> : <DesktopOutlined />;
+  const label = cat === 'mobile' ? '手机' : cat === 'tablet' ? '平板' : '电脑';
+  const color = cat === 'mobile' ? 'magenta' : cat === 'tablet' ? 'cyan' : 'blue';
+  const model = p.fingerprint.mobile?.deviceModel;
+  return (
+    <Tooltip title={model ? `${label} · ${model}` : label}>
+      <Tag color={color} icon={icon} style={{ marginRight: 0 }}>{label}</Tag>
+    </Tooltip>
+  );
+}
 
 type ViewMode = 'table' | 'card';
 
@@ -217,6 +243,18 @@ export default function ProfileList() {
         ) : <span style={{ color: '#bbb' }}>未分组</span>,
     },
     {
+      title: '设备',
+      width: 80,
+      align: 'center' as const,
+      render: (_: unknown, p: Profile) => renderDeviceTag(p),
+      filters: [
+        { text: '电脑', value: 'desktop' },
+        { text: '平板', value: 'tablet' },
+        { text: '手机', value: 'mobile' },
+      ],
+      onFilter: (val: unknown, p: Profile) => deviceCategoryOf(p) === val,
+    },
+    {
       title: '窗口名称',
       dataIndex: 'name',
       width: 200,
@@ -334,6 +372,7 @@ export default function ProfileList() {
                 className={runningSet.has(p.id) ? 'profile-card-running' : ''}
                 title={
                   <Space>
+                    {renderDeviceTag(p)}
                     {p.name}
                     {runningSet.has(p.id) && <Tag color="green">运行中</Tag>}
                   </Space>
@@ -358,7 +397,11 @@ export default function ProfileList() {
                 }
               >
                 <div style={{ fontSize: 12, color: '#666', lineHeight: 2 }}>
-                  <div>系统：<Tag>{p.fingerprint.os}</Tag></div>
+                  <div>系统：<Tag>{p.fingerprint.os}</Tag>
+                    {p.fingerprint.mobile?.deviceModel && (
+                      <Tag color="purple">{p.fingerprint.mobile.deviceModel}</Tag>
+                    )}
+                  </div>
                   <div>分辨率：{p.fingerprint.screen.width}x{p.fingerprint.screen.height}</div>
                   <div>时区：{p.fingerprint.timezone}</div>
                   <div>代理 IP：{formatProxyIp(p.proxyId).text}</div>

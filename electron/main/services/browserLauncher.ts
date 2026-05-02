@@ -7,6 +7,7 @@ import { buildLaunchOptions } from './fingerprintBuilder.js';
 import { getProfile, markProfileOpened } from './profileService.js';
 import { getProxy, testProxy } from './proxyService.js';
 import { needsBridge, startBridge, stopBridge } from './proxyBridge.js';
+import { applyMobileStealthToContext } from './mobileStealth.js';
 import { parseCookieJson, toPlaywrightCookies } from '@shared/cookieFormats';
 
 interface RunningBrowser {
@@ -427,6 +428,16 @@ export async function launchProfile(profileId: string): Promise<LaunchedBrowserI
       running.delete(profileId);
       void stopBridge(profileId);
     });
+  }
+
+  // Mobile stealth — CDP UA-CH override + InitScript patches for navigator,
+  // userAgentData, connection, chrome.*, Playwright residue cleanup, etc.
+  // Must run AFTER context launch so we have CDP access, but BEFORE the
+  // first newPage() so init scripts apply to it. No-op for desktop profiles.
+  try {
+    await applyMobileStealthToContext(context, fingerprintForLaunch);
+  } catch (err) {
+    console.warn('[launcher] mobile stealth setup failed (non-fatal):', (err as Error).message);
   }
 
   // Replay user-provided cookies BEFORE the first page is opened so that the
