@@ -217,6 +217,33 @@ export interface BuildLaunchOptionsResult {
   issues: ConsistencyIssue[];
 }
 
+/**
+ * Extra knobs the launcher passes into buildLaunchOptions:
+ *
+ *  - exitIp:           The IP the proxy publishes to the outside world.
+ *                       Used by --fingerprint-webrtc-ip so WebRTC ICE
+ *                       candidates report the proxy IP, not the host's
+ *                       LAN address.  Pass undefined to fall back to
+ *                       cloakbrowser's `auto` (resolves via an HTTP call
+ *                       through the proxy at launch time, slightly slower).
+ *  - humanPreset:      'default' / 'careful'.  Forwarded to cloakbrowser
+ *                       so mouse/keyboard interactions are humanized.
+ *  - disableHttp2:     Force HTTP/1.1 for fresh-session warm-up on sites
+ *                       that challenge first-time HTTP/2 visitors
+ *                       (Cloudflare, certain banks).
+ *  - fingerprintNoise: Toggle canvas/WebGL/audio noise injection.
+ *                       Default true.  Disabling produces deterministic
+ *                       (no noise) values still derived from the seed —
+ *                       useful when a site fingerprints the noise pattern
+ *                       itself (rare, advanced).
+ */
+export interface BuildLaunchExtras {
+  exitIp?: string | null;
+  humanPreset?: 'default' | 'careful';
+  disableHttp2?: boolean;
+  fingerprintNoise?: boolean;
+}
+
 function buildProxyString(proxy: ProxyConfig | null): string | undefined {
   if (!proxy) return undefined;
   const auth = proxy.username
@@ -234,7 +261,7 @@ export function buildLaunchOptions(
   fp: FingerprintConfig,
   proxy: ProxyConfig | null,
   userDataDir: string,
-  opts: { headless?: boolean; humanize?: boolean } = {},
+  opts: { headless?: boolean; humanize?: boolean } & BuildLaunchExtras = {},
 ): BuildLaunchOptionsResult {
   const issues = validateConsistency(fp);
 
@@ -289,7 +316,22 @@ export function buildLaunchOptions(
     // C++ patches, but explicit redundancy doesn't hurt and helps if a
     // future binary version regresses).
     '--disable-blink-features=AutomationControlled',
+    // Expose closed shadow roots to our own JS — needed by the built-in
+    // fingerprint test page so it can inspect reCAPTCHA / Turnstile widgets
+    // (both render inside closed shadow DOM). CloakBrowser 0.3.29+ feature.
+    '--enable-blink-features=FakeShadowRoot',
   ];
+
+  // Optional: HTTP/2 disable — some aggressive anti-bot rigs (Cloudflare,
+  // certain bank login pages) challenge first-time HTTP/2 visitors with a
+  // hard block. Once warm cookies are set the challenge stops, so this is
+  // a per-profile "warmup" toggle the user can flip for hostile sites.
+  if (opts.disableHttp2) args.push('--disable-http2');
+
+  // Optional: disable noise injection while keeping the deterministic seed.
+  // Useful for tests that fingerprint the noise PATTERN (very rare). Default
+  // keeps noise on because most antibots want a small per-launch jitter.
+  if (opts.fingerprintNoise === false) args.push('--fingerprint-noise=false');
 
   // Disabled features — collected then emitted as a single comma-joined flag
   // because Chromium uses last-wins for repeated --disable-features.
@@ -299,10 +341,35 @@ export function buildLaunchOptions(
     'SidePanelPinning',
   ];
 
+  // -------- WebRTC: leak prevention vs proxy-IP spoof --------
+  //   - 'disabled': force ALL UDP through the proxy (works only if proxy
+  //                 supports SOCKS5 UDP_ASSOCIATE; otherwise WebRTC just
+  //                 fails — that's fine, no leak).
+  //   - 'altered':  spoof ICE candidates to the proxy exit IP via
+  //                 CloakBrowser 0.3.29+ `--fingerprint-webrtc-ip` flag.
+  //                 The user can communicate via WebRTC normally; remote
+  //                 peers see the proxy IP, NOT the host LAN IP.
+  //                 This is what AdsPower/Multilogin call "spoof mode".
+  //   - 'real':     leave WebRTC alone but still spoof the local LAN IP
+  //                 via the same flag (so we don't leak 192.168.x.x).
   if (fp.webrtc.mode === 'disabled') {
     args.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
-  } else if (fp.webrtc.mode === 'altered') {
-    args.push('--force-webrtc-ip-handling-policy=default_public_interface_only');
+    args.push('--disable-features=WebRtcAllowDataChannelsInSdp');
+  } else {
+    // 'altered' or 'real' — both spoof the ICE candidate. If we know the
+    // proxy's exit IP we use it explicitly (no extra network call at launch);
+    // otherwise we ask cloakbrowser to auto-resolve via the proxy itself.
+    const webrtcIp = opts.exitIp && opts.exitIp.match(/^\d{1,3}(\.\d{1,3}){3}$/)
+      ? opts.exitIp
+      : (proxy ? 'auto' : null);
+    if (webrtcIp) {
+      args.push(`--fingerprint-webrtc-ip=${webrtcIp}`);
+    }
+    if (fp.webrtc.mode === 'altered' && proxy) {
+      // Belt-and-braces: also hint the default-route policy so even if the
+      // IP spoof flag is somehow ignored the LAN IP stays sealed.
+      args.push('--force-webrtc-ip-handling-policy=default_public_interface_only');
+    }
   }
 
   // -------- DNS / IP-leak hardening when a proxy is bound --------
@@ -357,7 +424,7 @@ export function buildLaunchOptions(
     locale: fp.locale,
     timezone: fp.timezone,
     humanize: opts.humanize ?? true,
-    humanPreset: 'default',
+    humanPreset: opts.humanPreset ?? 'default',
     stealthArgs: false, // we emit our own --fingerprint-* args; cloakbrowser's
                         // default seed would conflict with our deterministic seed.
     args,

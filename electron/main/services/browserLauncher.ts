@@ -94,14 +94,96 @@ function findExtractedBinary(): string | null {
   return null;
 }
 
+/**
+ * Read the file version of the chrome.exe (Windows resource version) so we
+ * can compare against what the cloakbrowser wrapper expects. On non-Windows
+ * we don't bother — Chromium's macOS / Linux binary doesn't carry a version
+ * resource we can read cheaply.
+ *
+ * Returns the major version string (e.g. '146.0.7680.177') or null.
+ */
+function readChromeProductVersion(chromeExe: string): string | null {
+  if (process.platform !== 'win32') return null;
+  try {
+    // PowerShell-free way: query the file's version info via Node's child
+    // process. We use wmic which is available everywhere on Windows.
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-Command', `(Get-Item '${chromeExe.replace(/'/g, "''")}').VersionInfo.ProductVersion`],
+      { encoding: 'utf-8', timeout: 5_000, windowsHide: true },
+    ).toString().trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compare two dotted version strings as numeric tuples. Returns:
+ *   <0 if a < b, 0 if equal, >0 if a > b.
+ * Missing tail components are treated as 0 (so "146" == "146.0.0.0").
+ */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = b.split('.').map((x) => parseInt(x, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const da = pa[i] ?? 0;
+    const db = pb[i] ?? 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+/**
+ * Lazily-imported cloakbrowser config — used to read the wrapper's expected
+ * Chromium version so we can detect stale extracted binaries. We avoid
+ * importing the full module at startup; the config sub-module is light.
+ */
+let expectedChromiumVersion: string | null = null;
+function getExpectedChromiumVersion(): string | null {
+  if (expectedChromiumVersion !== null) return expectedChromiumVersion;
+  try {
+    // cloakbrowser ships getChromiumVersion() that returns the version
+    // appropriate for the current platform (e.g. 146.0.7680.177.4 for win-x64).
+    // require() works because we're in the main process CJS context.
+    const cfg = require('cloakbrowser/dist/config.js') as {
+      getChromiumVersion?: () => string;
+      CHROMIUM_VERSION?: string;
+    };
+    expectedChromiumVersion = cfg.getChromiumVersion?.() ?? cfg.CHROMIUM_VERSION ?? null;
+  } catch {
+    expectedChromiumVersion = null;
+  }
+  return expectedChromiumVersion;
+}
+
 function configureCloakEnv(): void {
   // Highest priority: explicit override
   if (process.env.CLOAKBROWSER_BINARY_PATH) return;
 
-  // Second priority: pre-extracted binary in app territory (resources/ etc.)
+  // Second priority: pre-extracted binary in app territory (resources/ etc.).
+  // CRITICAL: also check the binary's actual product version matches what the
+  // currently-installed cloakbrowser wrapper expects. If they differ (because
+  // we bumped the wrapper but resources/ still has the old binary), use the
+  // wrapper's own cache resolution instead — it'll either find the new binary
+  // in ~/.cloakbrowser/chromium-<version>/ or prompt to download.
   const extracted = findExtractedBinary();
   if (extracted) {
-    process.env.CLOAKBROWSER_BINARY_PATH = extracted;
+    const expected = getExpectedChromiumVersion();
+    const actual = readChromeProductVersion(extracted);
+    // Trim wrapper version suffix (e.g. "146.0.7680.177.4" -> compare against "146.0.7680.177")
+    const expectedTrimmed = expected ? expected.split('.').slice(0, 4).join('.') : null;
+    const matches = !expectedTrimmed || !actual || compareVersions(actual, expectedTrimmed) >= 0;
+    if (matches) {
+      process.env.CLOAKBROWSER_BINARY_PATH = extracted;
+    } else {
+      // Log loudly so the user can see it in the dev console / log.
+      console.warn(
+        `[launcher] extracted binary ${actual} is older than wrapper-expected ${expectedTrimmed}; ` +
+        `falling back to wrapper's cache directory (~/.cloakbrowser).`,
+      );
+    }
   }
 
   // Cache dir is still useful even with a binary override (for download path,
@@ -292,18 +374,18 @@ export async function importCloakBinaryZip(
 async function alignFingerprintWithProxy(
   fp: import('@shared/types').FingerprintConfig,
   proxy: ProxyConfig | null,
-): Promise<import('@shared/types').FingerprintConfig> {
-  if (!proxy) return fp;
+): Promise<{ fp: import('@shared/types').FingerprintConfig; exitIp: string | null }> {
+  if (!proxy) return { fp, exitIp: null };
   let probe;
   try {
     probe = await testProxy(proxy, 8000);
   } catch (err) {
     console.warn('[launcher] proxy probe failed, using profile timezone as-is:', (err as Error).message);
-    return fp;
+    return { fp, exitIp: null };
   }
   if (!probe.ok) {
     console.warn('[launcher] proxy probe returned not-ok:', probe.error);
-    return fp;
+    return { fp, exitIp: null };
   }
 
   const aligned = JSON.parse(JSON.stringify(fp)) as typeof fp;
@@ -339,7 +421,7 @@ async function alignFingerprintWithProxy(
       aligned.geo.longitude = probe.longitude;
     }
   }
-  return aligned;
+  return { fp: aligned, exitIp: probe.ip ?? null };
 }
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -366,9 +448,17 @@ export async function launchProfile(profileId: string): Promise<LaunchedBrowserI
   // proxy is bound, probe it ONCE here (no DB write) and override the launch
   // timezone / language to match the exit IP. Falls back silently if probe
   // fails or proxy is omitted.
-  const fingerprintForLaunch = await alignFingerprintWithProxy(profile.fingerprint, proxy);
+  const { fp: fingerprintForLaunch, exitIp } = await alignFingerprintWithProxy(
+    profile.fingerprint,
+    proxy,
+  );
 
-  const built = buildLaunchOptions(fingerprintForLaunch, proxy, profile.userDataDir);
+  const built = buildLaunchOptions(fingerprintForLaunch, proxy, profile.userDataDir, {
+    exitIp,
+    humanPreset: profile.humanPreset ?? 'default',
+    disableHttp2: profile.disableHttp2 ?? false,
+    fingerprintNoise: profile.fingerprintNoise ?? true,
+  });
 
   const blockingErrors = built.issues.filter((i) => i.level === 'error');
   if (blockingErrors.length > 0) {

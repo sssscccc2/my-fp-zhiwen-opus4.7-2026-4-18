@@ -24,6 +24,9 @@ interface ProfileRow {
   last_opened_at: number | null;
   notes: string | null;
   cookies: string | null;
+  human_preset: string | null;
+  disable_http2: number | null;
+  fingerprint_noise: number | null;
 }
 
 /**
@@ -140,6 +143,10 @@ function rowToProfile(row: ProfileRow): Profile {
     lastOpenedAt: row.last_opened_at,
     notes: row.notes ?? undefined,
     cookies: row.cookies ?? undefined,
+    humanPreset: (row.human_preset === 'careful' ? 'careful' : 'default'),
+    disableHttp2: row.disable_http2 === 1,
+    // fingerprint_noise NULL or 1 -> enabled; only explicit 0 disables.
+    fingerprintNoise: row.fingerprint_noise !== 0,
   };
 }
 
@@ -193,8 +200,8 @@ export function createProfile(input: CreateProfileInput): Profile {
 
   const now = Date.now();
   run(
-    `INSERT INTO profiles (id, name, group_id, tags, fingerprint_config, proxy_id, user_data_dir, created_at, last_opened_at, notes, cookies)
-     VALUES (@id, @name, @groupId, @tags, @fingerprintConfig, @proxyId, @userDataDir, @createdAt, NULL, @notes, @cookies)`,
+    `INSERT INTO profiles (id, name, group_id, tags, fingerprint_config, proxy_id, user_data_dir, created_at, last_opened_at, notes, cookies, human_preset, disable_http2, fingerprint_noise)
+     VALUES (@id, @name, @groupId, @tags, @fingerprintConfig, @proxyId, @userDataDir, @createdAt, NULL, @notes, @cookies, @humanPreset, @disableHttp2, @fingerprintNoise)`,
     {
       id,
       name: input.name,
@@ -206,6 +213,9 @@ export function createProfile(input: CreateProfileInput): Profile {
       createdAt: now,
       notes: input.notes ?? null,
       cookies: input.cookies ?? null,
+      humanPreset: input.humanPreset ?? 'default',
+      disableHttp2: input.disableHttp2 ? 1 : 0,
+      fingerprintNoise: input.fingerprintNoise === false ? 0 : 1,
     },
   );
 
@@ -228,6 +238,18 @@ export function updateProfile(input: UpdateProfileInput): Profile {
   if (input.proxyId !== undefined) { updates.push('proxy_id = @proxyId'); params.proxyId = input.proxyId; }
   if (input.notes !== undefined) { updates.push('notes = @notes'); params.notes = input.notes; }
   if (input.cookies !== undefined) { updates.push('cookies = @cookies'); params.cookies = input.cookies || null; }
+  if (input.humanPreset !== undefined) {
+    updates.push('human_preset = @humanPreset');
+    params.humanPreset = input.humanPreset;
+  }
+  if (input.disableHttp2 !== undefined) {
+    updates.push('disable_http2 = @disableHttp2');
+    params.disableHttp2 = input.disableHttp2 ? 1 : 0;
+  }
+  if (input.fingerprintNoise !== undefined) {
+    updates.push('fingerprint_noise = @fingerprintNoise');
+    params.fingerprintNoise = input.fingerprintNoise === false ? 0 : 1;
+  }
 
   if (updates.length > 0) {
     run(`UPDATE profiles SET ${updates.join(', ')} WHERE id = @id`, params);

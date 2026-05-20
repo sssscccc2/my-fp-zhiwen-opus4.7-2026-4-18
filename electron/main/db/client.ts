@@ -123,6 +123,13 @@ function runMigrations(db: Database): void {
   safeExec('ALTER TABLE proxies ADD COLUMN dns_config TEXT', 'add proxies.dns_config');
   // 2026-04-18: per-profile cookie injection (paste from AdsPower / iSO etc.)
   safeExec('ALTER TABLE profiles ADD COLUMN cookies TEXT', 'add profiles.cookies');
+  // 2026-05-20 (v0.5.0): CloakBrowser 0.3.29 advanced launch knobs.
+  // human_preset: 'default' | 'careful' (NULL → default)
+  // disable_http2: 0/1
+  // fingerprint_noise: 0/1 (NULL → 1)
+  safeExec('ALTER TABLE profiles ADD COLUMN human_preset TEXT', 'add profiles.human_preset');
+  safeExec('ALTER TABLE profiles ADD COLUMN disable_http2 INTEGER', 'add profiles.disable_http2');
+  safeExec('ALTER TABLE profiles ADD COLUMN fingerprint_noise INTEGER', 'add profiles.fingerprint_noise');
 }
 
 export function getDb(): Database {

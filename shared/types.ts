@@ -215,6 +215,16 @@ export interface ParsedProxy {
   raw: string;
 }
 
+/**
+ * Speed profile for CloakBrowser's `humanize` mode (per-character keyboard
+ * delay, Bézier-curve mouse, scroll easing).
+ *   - 'default' : normal-speed human emulation
+ *   - 'careful' : slower & more deliberate — gives 0.9 reCAPTCHA scores at
+ *                  the cost of throughput. Recommended for first-time login
+ *                  to a hostile site, then switch back to default.
+ */
+export type HumanPreset = 'default' | 'careful';
+
 export interface Profile {
   id: string;
   name: string;
@@ -233,6 +243,20 @@ export interface Profile {
    * launch via `context.addCookies()`.
    */
   cookies?: string;
+  // --- v0.5.0: CloakBrowser 0.3.29 advanced knobs (all optional, sensible defaults) ---
+  /** Speed of humanize input emulation. Defaults to 'default'. */
+  humanPreset?: HumanPreset;
+  /**
+   * Force HTTP/1.1 (--disable-http2) for fresh-session warmup against
+   * sites that challenge first HTTP/2 visitors. Defaults to false.
+   */
+  disableHttp2?: boolean;
+  /**
+   * Whether to keep canvas / WebGL / audio noise injection. Defaults to true.
+   * Disabling produces deterministic per-seed values — useful only when a
+   * site fingerprints the NOISE pattern itself (extremely rare).
+   */
+  fingerprintNoise?: boolean;
 }
 
 export interface ProfileGroup {
@@ -264,6 +288,9 @@ export interface CreateProfileInput {
   proxyId?: string | null;
   notes?: string;
   cookies?: string;
+  humanPreset?: HumanPreset;
+  disableHttp2?: boolean;
+  fingerprintNoise?: boolean;
 }
 
 export interface UpdateProfileInput {
@@ -275,4 +302,7 @@ export interface UpdateProfileInput {
   proxyId?: string | null;
   notes?: string;
   cookies?: string;
+  humanPreset?: HumanPreset;
+  disableHttp2?: boolean;
+  fingerprintNoise?: boolean;
 }

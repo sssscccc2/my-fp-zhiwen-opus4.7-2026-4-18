@@ -133,8 +133,12 @@ export async function startCustomDnsBridge(
       const respBody = await readDnsResponse(socket, tcpFrame);
       const decoded = dnsPacket.decode(respBody);
 
-      const aRecords = (decoded.answers ?? [])
-        .filter((a) => a.type === 'A')
+      // After the @types/dns-packet upgrade the Answer union includes OptAnswer
+      // which lacks `data`. Filter to A records via a type guard on plain
+      // {type, data?} shape — works regardless of the precise union member.
+      type AnyAnswer = { type: string; data?: unknown };
+      const aRecords = ((decoded.answers ?? []) as AnyAnswer[])
+        .filter((a) => a.type === 'A' && a.data !== undefined)
         .map((a) => String(a.data));
 
       if (aRecords.length === 0) {

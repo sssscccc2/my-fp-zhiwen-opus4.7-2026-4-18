@@ -1,11 +1,67 @@
 # 天胡 6 金 / 指纹浏览器 (Fingerprint Browser)
 
 > 开源、本地化、类 AdsPower 的反关联指纹浏览器配置文件管理器
-> 基于 [CloakBrowser](https://github.com/CloakHQ/CloakBrowser)（C++ 源码级补丁的 Chromium 145）构建
+> 基于 [CloakBrowser](https://github.com/CloakHQ/CloakBrowser)（C++ 源码级补丁的 **Chromium 146**）构建
 
 ---
 
 ## 更新日志
+
+### v0.5.0 — 🧬 CloakBrowser 0.3.29 全量集成（2026-05-20）
+
+升级到 **CloakBrowser 0.3.29 / Chromium 146.0.7680.177.4**，接入新版本所有 5 个反检测能力。
+
+**升级清单**
+
+| 项                          | v0.4.0       | v0.5.0                                |
+| -------------------------- | ------------ | ------------------------------------- |
+| `cloakbrowser` wrapper     | `^0.3.24`    | **`^0.3.29`**                          |
+| Chromium 版本                | 145.0.7632.x | **146.0.7680.177.4**                   |
+| C++ source-level patch     | 33           | **57** (+24)                           |
+| UA 字符串                    | Chrome/145   | **Chrome/146**                        |
+| TLS 指纹                     | 与 Chrome 145 一致 | 与 Chrome 146 一致（ja3n/ja4/akamai match） |
+
+**新能力**
+
+- ✅ **WebRTC ICE IP 跟随代理出口** — 注入 `--fingerprint-webrtc-ip=<proxy_exit_ip>`，远端只看到代理 IP，本机 LAN IP 不外泄；探测失败时回落 `auto`
+- ✅ **代理信号清洗** — DNS / connect / SSL 时序归零，`Proxy-Connection` header 不再泄漏（CloakBrowser 0.3.29 内置）
+- ✅ **`--enable-blink-features=FakeShadowRoot`** — 默认开，让指纹检测页能查 reCAPTCHA / Turnstile 闭合 shadow DOM
+- ✅ **humanize 升级** — 0.3.29 改用 isolated worlds + trusted dispatch 投递键盘事件，对 reCAPTCHA Enterprise 友好
+- ✅ **每窗口独立 humanize 速度预设**（默认 / 谨慎）
+
+**新窗口选项**
+
+- 🆕 **HTTP/2 一次性 warmup 模式** — 强制 `--disable-http2`，养出 cookie 后再恢复，搞定 Cloudflare 全防的银行类站点首次访问
+- 🆕 **指纹噪声开关** — 默认开（推荐），高级用户可关
+- 🆕 **存储配额预设** — 500 / 1000 / 3000 / 5000 / 10000 MB，每档带 FingerprintJS vs BrowserScan trade-off 提示
+- 🆕 **二进制版本自检** — 发现 `resources/` 里旧内核（145）时自动 fallback 到 cache 目录里的 146
+
+**检测对比**（CloakBrowser 官方基准）
+
+| 站点                    | v0.4.0 (Chromium 145, 33 patches) | v0.5.0 (Chromium 146, 57 patches) |
+| --------------------- | -------------------------------- | -------------------------------- |
+| reCAPTCHA v3           | 0.7-0.9                           | **0.9 (human)**                  |
+| Cloudflare Turnstile   | 大概率通过                          | **直接通过**                          |
+| FingerprintJS          | 通过                              | **通过**                            |
+| BrowserScan            | 部分项 -10                          | **NORMAL 4/4**                    |
+| WebRTC LAN IP 泄漏     | altered 模式下偶发 192.168.* | **完全无泄漏**                  |
+
+**数据库迁移**
+
+新增 3 列（`human_preset` / `disable_http2` / `fingerprint_noise`），自动应用，老窗口零改动。
+
+**新增 / 修改文件**
+
+| 路径                                              | 说明                                                          |
+|------------------------------------------------|------------------------------------------------------------|
+| `electron/main/services/fingerprintBuilder.ts` | 新增 `BuildLaunchExtras` 接口；WebRTC IP 透传；FakeShadowRoot；HTTP/2 |
+| `electron/main/services/browserLauncher.ts`    | `getExpectedChromiumVersion` + `readChromeProductVersion` 版本自检 |
+| `electron/main/services/profileService.ts`     | 持久化 3 个新字段                                                |
+| `electron/main/db/client.ts`                   | SQLite migration: profiles.human_preset / disable_http2 / fingerprint_noise |
+| `shared/types.ts`                              | `HumanPreset` 类型 + Profile 高级字段                          |
+| `src/pages/ProfileEditor.tsx`                  | 新增「高级 (CloakBrowser)」Tab + 存储配额预设下拉                  |
+| `resources/cloakbrowser-windows-x64/`          | 整体替换为 Chromium 146.0.7680.177（536 MB, 678 files）           |
+| `release-notes-v0.5.0.md`                      | 详细发布说明                                                  |
 
 ### v0.4.0 — 📱 移动端窗口模式（iOS / Android 反检测）（2026-05-03）
 

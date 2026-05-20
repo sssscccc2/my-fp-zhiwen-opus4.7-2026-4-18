@@ -204,6 +204,10 @@ export default function ProfileEditor() {
           proxyId: null,
           groupId: null,
           notes: '',
+          // v0.5.0: CloakBrowser advanced defaults (humanize-on, normal speed, noise-on, http2-on)
+          humanPreset: 'default',
+          disableHttp2: false,
+          fingerprintNoise: true,
         } as unknown as FormValues);
       }
     })();
@@ -433,6 +437,11 @@ export default function ProfileEditor() {
         tags,
         notes: values.notes ?? '',
         fingerprint: values.fingerprint,
+        // v0.5.0: forward CloakBrowser advanced knobs. Defaults are applied
+        // server-side too — these only override when the user toggled them.
+        humanPreset: values.humanPreset ?? 'default',
+        disableHttp2: !!values.disableHttp2,
+        fingerprintNoise: values.fingerprintNoise !== false,
       };
       if (cookiesPayload !== undefined) payload.cookies = cookiesPayload;
 
@@ -1113,8 +1122,30 @@ export default function ProfileEditor() {
                         </Form.Item>
                       </Col>
                       <Col span={8}>
-                        <Form.Item name={['fingerprint', 'storageQuotaMB']} label="存储配额 (MB)">
-                          <InputNumber style={{ width: '100%' }} min={500} max={1024 * 100} step={500} />
+                        <Form.Item
+                          name={['fingerprint', 'storageQuotaMB']}
+                          label={
+                            <Tooltip title={
+                              <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+                                <div><b>~500 MB</b>（默认）：通过 FingerprintJS，但 BrowserScan 把无痕减 10 分</div>
+                                <div><b>5000 MB</b>：通过 BrowserScan，但可能被 FingerprintJS 当作真人</div>
+                                <div><b>1000-3000 MB</b>：均衡（推荐用于一般站点）</div>
+                              </div>
+                            }>
+                              存储配额 (MB) ⓘ
+                            </Tooltip>
+                          }
+                        >
+                          <Select
+                            allowClear={false}
+                            options={[
+                              { label: '500 MB · FingerprintJS-safe（默认）', value: 500 },
+                              { label: '1000 MB · 均衡', value: 1000 },
+                              { label: '3000 MB · 偏向通过 BrowserScan', value: 3000 },
+                              { label: '5000 MB · BrowserScan-safe（推荐持久窗口）', value: 5000 },
+                              { label: '10000 MB · 真人级配额', value: 10000 },
+                            ]}
+                          />
                         </Form.Item>
                       </Col>
                     </Row>
@@ -1238,6 +1269,71 @@ export default function ProfileEditor() {
                         { label: 'Real（展示真实本机 IP，禁用！）', value: 'real' },
                       ]} />
                     </Form.Item>
+                  ),
+                },
+                {
+                  key: 'advanced', label: '高级 (CloakBrowser)', forceRender: true,
+                  children: (
+                    <Row gutter={16}>
+                      <Col span={24} style={{ marginBottom: 12 }}>
+                        <Alert
+                          type="info"
+                          showIcon
+                          message="CloakBrowser 0.3.29 进阶选项（默认即开箱通过 reCAPTCHA / Cloudflare Turnstile）"
+                          description={
+                            <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                              这些选项只影响 <strong>启动行为</strong>，不影响指纹本身。默认值已经够用，遇到强检测站点（reCAPTCHA Enterprise、Cloudflare 全防、银行登录）再调。
+                            </div>
+                          }
+                        />
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          name="humanPreset"
+                          label={
+                            <Tooltip title={
+                              <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+                                <div><b>默认</b>：正常人速度（B&eacute;zier 鼠标 / 逐字符键盘 / 滚轮平滑）</div>
+                                <div><b>谨慎（careful）</b>：更慢、更深思熟虑，动作之间有微抖动 — 用于第一次登录 reCAPTCHA Enterprise / 强 Bot 站</div>
+                              </div>
+                            }>
+                              鼠标 / 键盘行为预设 ⓘ
+                            </Tooltip>
+                          }
+                        >
+                          <Select options={[
+                            { label: '默认（normal speed，推荐）', value: 'default' },
+                            { label: '谨慎（careful · 更慢、过 reCAPTCHA Enterprise）', value: 'careful' },
+                          ]} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={6}>
+                        <Form.Item
+                          name="disableHttp2"
+                          label={
+                            <Tooltip title="某些站点（部分银行 / Cloudflare 全防）对第一次 HTTP/2 访客发硬挑战。开启后强制走 HTTP/1.1，养出 cookie 后可关闭恢复 HTTP/2。">
+                              强制 HTTP/1.1 ⓘ
+                            </Tooltip>
+                          }
+                          valuePropName="checked"
+                        >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col span={6}>
+                        <Form.Item
+                          name="fingerprintNoise"
+                          label={
+                            <Tooltip title="保留 canvas / WebGL / audio 噪声注入（强烈建议开启）。关闭后每次启动指纹完全相同 — 仅在测试指纹稳定性时使用。">
+                              指纹噪声 ⓘ
+                            </Tooltip>
+                          }
+                          valuePropName="checked"
+                        >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                    </Row>
                   ),
                 },
                 {
